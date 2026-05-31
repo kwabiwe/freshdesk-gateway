@@ -3,20 +3,23 @@
 The gateway renders the structured record into Freshdesk rich HTML using this section order:
 
 1. Change title
-2. Planned change date
-3. Customer / environment
-4. Configuration items
-5. Background
-6. Change description
-7. Implementation steps
-8. Rollback plan
-9. Verification plan
+2. Change classification
+3. Planned window, or planned change date when start and end are not known
+4. Customer / environment
+5. Configuration items
+6. Background
+7. Change description
+8. Implementation steps
+9. Rollback plan
+10. Verification plan
    - Pre-change verification
    - In-change verification
    - Post-change verification
-10. Risk and impact
-11. Expected outcome
-12. Success criteria
-13. Dependencies when present
+11. Risk and impact
+12. Expected outcome
+13. Success criteria
+14. Risks and mitigations when present
+15. Communication plan when present
+16. Dependencies when present
 
-Always populate the operational core. Use `TBD` where the source does not support a specific answer. The gateway displays assumptions separately for review and does not include them in the Freshdesk description.
+Always populate the operational core. Use `TBD` where the source does not support a specific answer. The gateway displays assumptions, open questions, TBD values, validation blockers and field-mapping notes separately for local review. It does not include those internal review notes in the Freshdesk description.

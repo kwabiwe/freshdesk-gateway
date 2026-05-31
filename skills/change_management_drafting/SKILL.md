@@ -1,6 +1,6 @@
 # Change Management Drafting Skill
 
-Version: 2.0.0
+Version: 2.1.0
 
 Convert sparse technical notes, pasted emails, chat messages, implementation plans, vendor updates, customer requests and engineer notes into a complete operational change record suitable for a Freshdesk-style change ticket.
 

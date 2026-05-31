@@ -18,12 +18,30 @@ def _section(title: str, body: str) -> str:
     return f"<h2>{escape(title)}</h2>{body}"
 
 
+def _useful(value: str) -> bool:
+    return bool(value and value.strip().lower() not in {"tbd", "not provided", "unknown"})
+
+
 def render_change_html(document: ChangeDocument) -> str:
     parts = [
         f"<h1>{_text(document.title)}</h1>",
-        _section("Planned change date", f"<p>{_text(document.planned_change_date)}</p>"),
-        _section("Customer / environment", f"<p><strong>Customer:</strong> {_text(document.customer)}<br><strong>Environment:</strong> {_text(document.environment)}</p>"),
+        _section("Change classification", f"<p><strong>Type:</strong> {_text(document.change_type)}</p>"),
     ]
+    if _useful(document.planned_start) or _useful(document.planned_end):
+        parts.append(
+            _section(
+                "Planned window",
+                f"<p><strong>Start:</strong> {_text(document.planned_start)}<br>"
+                f"<strong>End:</strong> {_text(document.planned_end)}</p>",
+            )
+        )
+    else:
+        parts.append(_section("Planned change date", f"<p>{_text(document.planned_change_date)}</p>"))
+    parts.extend(
+        [
+        _section("Customer / environment", f"<p><strong>Customer:</strong> {_text(document.customer)}<br><strong>Environment:</strong> {_text(document.environment)}</p>"),
+        ]
+    )
     if document.configuration_items:
         rows = "".join(
             f"<tr><td>{_text(item.name)}</td><td>{_text(item.item_type)}</td><td>{_text(item.site_location)}</td>"
@@ -57,11 +75,23 @@ def render_change_html(document: ChangeDocument) -> str:
     parts.extend(
         [
             _section("Verification plan", verification),
-            _section("Risk and impact", f"<p>{_text(document.risk_and_impact)}</p>"),
+            _section(
+                "Risk and impact",
+                f"<p><strong>Risk:</strong> {_text(document.risk)}<br><strong>Impact:</strong> {_text(document.impact)}"
+                f"<br><strong>Summary:</strong> {_text(document.risk_and_impact)}</p>",
+            ),
             _section("Expected outcome", f"<p>{_text(document.expected_outcome)}</p>"),
             _section("Success criteria", _list(document.success_criteria)),
         ]
     )
+    if document.risks_and_mitigations:
+        rows = "".join(
+            f"<tr><td>{_text(item.risk)}</td><td>{_text(item.mitigation)}</td></tr>"
+            for item in document.risks_and_mitigations
+        )
+        parts.append(_section("Risks and mitigations", f"<table><thead><tr><th>Risk</th><th>Mitigation</th></tr></thead><tbody>{rows}</tbody></table>"))
+    if document.communication_plan:
+        parts.append(_section("Communication plan", _list(document.communication_plan)))
     if document.dependencies:
         parts.append(_section("Dependencies", _list(document.dependencies)))
     return "".join(parts)

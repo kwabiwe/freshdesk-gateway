@@ -130,16 +130,19 @@ class LocalLLMClient:
                     response.raise_for_status()
                     return response.json().get("response", "").strip()
 
-                response = client.post(
-                    f"{self._openai_base(base_url)}/chat/completions",
-                    json={
-                        "model": settings.ollama_model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0.2,
-                        "max_tokens": max_tokens,
-                        "stream": False,
-                    },
-                )
+                payload = {
+                    "model": settings.ollama_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.2,
+                    "max_tokens": max_tokens,
+                    "stream": False,
+                }
+                if json_output:
+                    payload["response_format"] = {"type": "json_object"}
+                response = client.post(f"{self._openai_base(base_url)}/chat/completions", json=payload)
+                if json_output and response.status_code in {400, 422}:
+                    payload.pop("response_format", None)
+                    response = client.post(f"{self._openai_base(base_url)}/chat/completions", json=payload)
                 response.raise_for_status()
                 return response.json()["choices"][0]["message"]["content"].strip()
         except httpx.TimeoutException as exc:
@@ -157,17 +160,34 @@ class LocalLLMClient:
                 detail="The local model server is unavailable. You can continue with a manual draft.",
             ) from exc
 
+    @staticmethod
+    def _parse_json_object(response: str) -> dict[str, Any]:
+        start, end = response.index("{"), response.rindex("}") + 1
+        parsed = json.loads(response[start:end])
+        if not isinstance(parsed, dict):
+            raise ValueError("Expected an object")
+        return parsed
+
     def generate_json(self, prompt: str, source_text: str, *, max_tokens: int = 1400) -> dict[str, Any]:
         response = self.generate(prompt, source_text, max_tokens=max_tokens, json_output=True)
         try:
-            start, end = response.index("{"), response.rindex("}") + 1
-            parsed = json.loads(response[start:end])
-            if not isinstance(parsed, dict):
-                raise ValueError("Expected an object")
-            return parsed
+            return self._parse_json_object(response)
         except (ValueError, json.JSONDecodeError) as exc:
             self.audit.record("local_llm_invalid_json", "local", error=str(exc))
-            raise HTTPException(status_code=502, detail="The local model returned an invalid structured draft. Try again or edit manually.") from exc
+            repair_prompt = (
+                "Repair the malformed local-model response below into one valid JSON object. "
+                "Preserve the supplied values. Return JSON only, with no markdown fences or explanation.\n\n"
+                f"MALFORMED RESPONSE:\n{response[:12000]}"
+            )
+            repaired = self.generate(repair_prompt, source_text, max_tokens=max_tokens, json_output=True)
+            try:
+                return self._parse_json_object(repaired)
+            except (ValueError, json.JSONDecodeError) as repair_exc:
+                self.audit.record("local_llm_json_repair_failed", "local", error=str(repair_exc))
+                raise HTTPException(
+                    status_code=502,
+                    detail="The local model returned an invalid structured draft. Try again or edit manually.",
+                ) from repair_exc
 
     def rewrite(self, text: str) -> str:
         prompt = (

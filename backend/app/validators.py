@@ -28,7 +28,9 @@ class TicketValidator:
 
     @staticmethod
     def _missing(value: Any) -> bool:
-        return value is None or value == "" or value == []
+        return value is None or value == "" or value == [] or (
+            isinstance(value, str) and value.strip().lower() in {"tbd", "not provided", "unknown"}
+        )
 
     def validate(self, payload: dict[str, Any]) -> dict[str, Any]:
         missing: list[dict[str, Any]] = []

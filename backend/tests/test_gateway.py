@@ -21,12 +21,14 @@ from app.database import Database
 from app.draft_assistant import DraftAssistantService
 from app.draft_store import DraftStore
 from app.emergency import EmergencyStop
+from app.freshdesk_field_mapper import FreshdeskFieldMapper
 from app.freshdesk_client import FreshdeskClient
 from app.main import create_app
 from app.local_llm_client import LocalLLMClient
 from app.ollama_client import OllamaClient
 from app.rate_limit import RateLimiter
 from app.schema_cache import SchemaCache
+from app.schema_context import SchemaContextBuilder
 from app.schema_service import SchemaService
 from app.sensitive_data import detect_secrets
 from app.skill_registry import SkillRegistry
@@ -205,6 +207,39 @@ def test_local_llm_supports_openai_compatible_server(core, settings: Settings):
     local_llm = LocalLLMClient(lambda: compatible, audit, transport=httpx.MockTransport(handler))
     assert local_llm.list_models()["models"] == ["local-model"]
     assert local_llm.rewrite("Plain notes") == "Local response"
+
+
+def test_local_llm_repairs_invalid_json_once(core, settings: Settings):
+    _, audit, _, _, _, _ = core
+    responses = iter(["not-json", '{"change_document":{"title":"Repaired"}}'])
+
+    def handler(request: httpx.Request):
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "llama3.1"}]}, request=request)
+        return httpx.Response(200, json={"response": next(responses)}, request=request)
+
+    local_llm = LocalLLMClient(lambda: settings, audit, transport=httpx.MockTransport(handler))
+    assert local_llm.generate_json("Create JSON", "Plain notes")["change_document"]["title"] == "Repaired"
+
+
+def test_openai_compatible_json_mode_falls_back_when_unsupported(core, settings: Settings):
+    _, audit, _, _, _, _ = core
+    compatible = replace(settings, ollama_url="http://127.0.0.1:1234", local_llm_provider="openai-compatible")
+    payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request):
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "local-model"}]}, request=request)
+        payload = json.loads(request.content)
+        payloads.append(payload)
+        if "response_format" in payload:
+            return httpx.Response(400, json={"error": "unsupported"}, request=request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"title":"Local JSON"}'}}]}, request=request)
+
+    local_llm = LocalLLMClient(lambda: compatible, audit, transport=httpx.MockTransport(handler))
+    assert local_llm.generate_json("Create JSON", "Plain notes") == {"title": "Local JSON"}
+    assert payloads[0]["response_format"] == {"type": "json_object"}
+    assert "response_format" not in payloads[1]
 
 
 def test_freshdesk_client_constructs_ticket_request(core, settings: Settings):
@@ -419,6 +454,7 @@ def change_schema(schema: SchemaCache):
             {"name": "cf_customer967575", "choices": ["A24", "Wise_UK"]},
             {"name": "cf_chg_business_impact", "choices": ["Minor", "Moderate", "Significant"]},
             {"name": "cf_change_catergory", "choices": ["Application", "Network"]},
+            {"name": "cf_risk", "label": "Risk", "choices": ["Low", "Medium", "High"]},
         ],
     )
     schema.put("groups", [{"id": 9, "name": "L3 Engineering"}])
@@ -435,6 +471,7 @@ def wise_change_document():
             {"name": "wiseld5-hsm-2", "item_type": "HSM", "site_location": "LD5", "purpose": "Firmware upgrade", "version": "Target 2.3a"},
             {"name": "wiseld8-hsm-1", "item_type": "HSM", "site_location": "LD8", "purpose": "Firmware upgrade", "version": "Target 2.3a"},
             {"name": "wiseld8-hsm-2", "item_type": "HSM", "site_location": "LD8", "purpose": "Firmware upgrade", "version": "Target 2.3a"},
+            {"name": "Stargate", "item_type": "Application", "site_location": "Production", "purpose": "Validate commands against upgraded HSMs"},
         ],
         "background": "Upgrade firmware to version 2.3a to resolve the mTLS-related bug before rollout.",
         "change_description": "Upgrade the four HSMs to 2.3a and roll out mTLS using a phased LD5-first approach.",
@@ -483,17 +520,138 @@ def test_change_skill_wise_uk_fixture_maps_full_document(core, settings: Setting
     document = result["change_document"]
     custom = result["suggestions"]["custom_fields"]
     assert document["planned_change_date"] == "Tuesday 2 June 2026"
-    assert len(document["configuration_items"]) == 4
+    assert {item["name"] for item in document["configuration_items"] if item["item_type"] == "HSM"} == {
+        "wiseld5-hsm-1",
+        "wiseld5-hsm-2",
+        "wiseld8-hsm-1",
+        "wiseld8-hsm-2",
+    }
+    assert "Stargate" in {item["name"] for item in document["configuration_items"]}
     assert custom["cf_customer967575"] == "Wise_UK"
     assert custom["cf_change_type"] == "Normal"
     assert custom["cf_change_state"] == "Pending approval"
     assert custom["cf_approval_state"] == "Not Yet Requested"
+    assert custom["cf_risk"] == "High"
     assert result["suggestions"]["group_id"] == 9
     assert "2.3a" in result["rendered_description"]
     assert "mTLS" in result["rendered_description"]
     assert "Tuesday 2 June 2026" in result["assumptions"][0]
     assert result["skill_id"] == "change_management_drafting"
-    assert result["skill_version"] == "2.0.0"
+    assert result["skill_version"] == "2.1.0"
+
+
+def test_schema_context_includes_required_and_change_related_fields(core):
+    _, _, _, _, schema, _ = core
+    schema.put(
+        "ticket_fields",
+        [
+            {"name": "subject", "label": "Subject", "type": "default_subject"},
+            {
+                "name": "cf_rollback_plan",
+                "label": "Rollback Plan",
+                "type": "custom_paragraph",
+                "required_for_agents": True,
+            },
+        ],
+    )
+    context = SchemaContextBuilder(schema).build()
+    assert context["required_fields"][0]["name"] == "cf_rollback_plan"
+    assert context["required_fields"][0]["required_for_agents"] is True
+    assert "cf_rollback_plan" in {field["name"] for field in context["change_related_fields"]}
+
+
+def test_dynamic_custom_field_mapper_populates_rollback_plan(core, settings: Settings):
+    _, _, _, _, schema, _ = core
+    schema.put("ticket_fields", [{"name": "cf_backout", "label": "Rollback Plan", "type": "custom_paragraph"}])
+    document = ChangeDocument.model_validate(
+        {"rollback_branches": [{"scenario": "Validation fails", "steps": ["Remove the firewall rule.", "Confirm known-good path."]}]}
+    )
+    mapped = FreshdeskFieldMapper(SchemaContextBuilder(schema).build()).map(
+        document,
+        render_change_html(document),
+        TicketDefaultsService(schema, lambda: settings).defaults("change"),
+    )
+    assert "Remove the firewall rule." in mapped.suggestions["custom_fields"]["cf_backout"]
+    assert "Mapped rollback to Rollback Plan" in mapped.notes[0]
+
+
+def test_dynamic_mapper_clears_conflicting_customer_default_but_keeps_approval_default(core):
+    _, _, _, _, schema, _ = core
+    schema.put(
+        "ticket_fields",
+        [
+            {"name": "cf_customer", "label": "Customer", "choices": ["A24", "Wise_UK"], "required_for_agents": True},
+            {"name": "cf_approval_state", "label": "Approval State", "choices": ["Not Yet Requested"]},
+        ],
+    )
+    document = ChangeDocument(customer="Acme Inc")
+    mapped = FreshdeskFieldMapper(SchemaContextBuilder(schema).build()).map(
+        document,
+        render_change_html(document),
+        {"custom_fields": {"cf_customer": "A24", "cf_approval_state": "Not Yet Requested"}},
+    )
+    assert "cf_customer" not in mapped.suggestions["custom_fields"]
+    assert mapped.suggestions["custom_fields"]["cf_approval_state"] == "Not Yet Requested"
+    assert mapped.low_confidence_fields == ["cf_customer"]
+    assert mapped.open_questions == ["Select an allowed value for required dropdown Customer."]
+
+
+def test_sparse_firewall_change_preserves_engineering_detail_and_flags_window(core, settings: Settings):
+    _, _, _, _, schema, _ = core
+    change_schema(schema)
+    notes = (
+        "Need a change for Acme. Allow new SFTP traffic from 10.10.50.25 to partner "
+        "203.0.113.15 on TCP 22. Production firewall. Doing it Thursday night. "
+        "Rollback is remove rule. Verify with test connection."
+    )
+
+    class StubLocalLLM:
+        def generate_json(self, prompt, source_text, max_tokens=0):
+            return {
+                "title": "Change Request - Acme - Allow production SFTP traffic",
+                "customer": "Acme",
+                "environment": "Production firewall",
+                "background": "Allow partner SFTP connectivity.",
+                "description": "Allow 10.10.50.25 to reach 203.0.113.15 on TCP 22 through the production firewall.",
+                "implementation_steps": ["Add the restricted firewall rule for 10.10.50.25 to 203.0.113.15 on TCP 22."],
+                "rollback_plan": ["Remove the newly added firewall rule."],
+                "verification": {"post_change": ["Run a test connection and confirm the firewall logs show the expected TCP 22 flow."]},
+            }
+
+    result = ChangeService(
+        StubLocalLLM(),
+        schema,
+        TicketDefaultsService(schema, lambda: settings),
+        now_provider=lambda: datetime(2026, 5, 31, 9, tzinfo=ZoneInfo("Europe/London")),
+    ).suggest(notes)
+    rendered = result["rendered_description"]
+    assert "10.10.50.25" in rendered
+    assert "203.0.113.15" in rendered
+    assert "TCP 22" in rendered
+    assert "Remove the newly added firewall rule." in rendered
+    assert "firewall logs" in rendered
+    assert "Thursday 4 June 2026" in result["assumptions"][0]
+    assert any("exact start time" in question for question in result["open_questions"])
+
+
+def test_suggest_change_previews_missing_required_field_before_save(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    services.schema_cache.put(
+        "ticket_fields",
+        [{"name": "cf_implementation_owner", "label": "Implementation Owner", "type": "custom_text", "required_for_agents": True}],
+    )
+
+    class StubLocalLLM:
+        def generate_json(self, prompt, source_text, max_tokens=0):
+            return {"title": "Change request", "background": "Background", "description": "Description"}
+
+    services.changes.local_llm = StubLocalLLM()
+    result = TestClient(app).post("/api/local-llm/suggest-change", json={"text": "Update routing policy."})
+    assert result.status_code == 200
+    body = result.json()
+    assert body["validation_preview"]["valid"] is False
+    assert body["missing_required_fields"][0]["name"] == "cf_implementation_owner"
 
 
 def test_skill_registry_discovers_manifest_backed_change_skill():
@@ -503,11 +661,12 @@ def test_skill_registry_discovers_manifest_backed_change_skill():
         {
             "id": "change_management_drafting",
             "name": "Change Management Drafting",
-            "version": "2.0.0",
+            "version": "2.1.0",
             "summary": "Convert sparse operational notes and pasted evidence into a complete, approval-ready change record.",
             "sections": [
                 "Title",
-                "Planned change date",
+                "Change classification",
+                "Planned window",
                 "Customer / environment",
                 "Configuration items",
                 "Background",
@@ -516,16 +675,19 @@ def test_skill_registry_discovers_manifest_backed_change_skill():
                 "Rollback plan",
                 "Verification plan",
                 "Risk and impact",
+                "Risks and mitigations",
+                "Communication plan",
                 "Expected outcome",
                 "Success criteria",
                 "Dependencies",
                 "Assumptions requiring review",
+                "Open questions for local review",
             ],
         }
     ]
     skill = registry.get("change_management_drafting")
     assert "Use clear British English." in skill.instructions()
-    assert skill.overview()["version"] == "2.0.0"
+    assert skill.overview()["version"] == "2.1.0"
 
 
 def test_configuration_item_accepts_improved_skill_field_aliases():
