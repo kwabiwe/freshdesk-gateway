@@ -36,6 +36,7 @@ The browser never receives the Freshdesk API key. Every future interface, includ
 | `freshdesk_client.py` | The only credentialed Freshdesk HTTP client |
 | `schema_cache.py` | Local Freshdesk schema cache |
 | `schema_service.py` | Permission-aware schema discovery |
+| `schema_context.py` | Compact synced-schema projection for local change drafting |
 | `validators.py` | Required-field and sensitive-data validation |
 | `ticket_templates.py` | Legacy manual change fallback rendering |
 | `draft_store.py` | Drafts, expiry, batch parsing, editing, and created state |
@@ -45,7 +46,8 @@ The browser never receives the Freshdesk API key. Every future interface, includ
 | `change_models.py` | Authoritative structured change-document schema |
 | `skill_registry.py` | Discovers manifest-backed local drafting skill folders |
 | `change_renderer.py` | Escaped rich HTML Freshdesk Description renderer |
-| `change_service.py` | Dedicated structured change generation and schema mapping |
+| `freshdesk_field_mapper.py` | Tenant-neutral deterministic mapping into discovered Freshdesk fields |
+| `change_service.py` | Dedicated structured change generation, pre-save preview, and orchestration |
 | `related_tickets.py` | Constrained identity-based Freshdesk ticket lookup |
 | `main.py` | FastAPI composition, REST routes, and built-frontend serving |
 

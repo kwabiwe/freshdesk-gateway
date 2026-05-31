@@ -495,6 +495,7 @@ const initialTicket = {
   custom_fields: {},
   change_document: null,
   assumptions: [],
+  change_review: null,
   skill_version: "",
 };
 
@@ -530,6 +531,17 @@ function parseRollbackBranches(value) {
   return branches;
 }
 
+function riskMitigationLines(items) {
+  return (items || []).map((item) => `${item.risk || "TBD"} | ${item.mitigation || "TBD"}`).join("\n");
+}
+
+function parseRiskMitigations(value) {
+  return textLines(value).map((line) => {
+    const [risk = "TBD", ...mitigationParts] = line.split("|").map((item) => item.trim());
+    return { risk, mitigation: mitigationParts.join(" | ") || "TBD" };
+  });
+}
+
 function ChangeSectionEditor({ document, setDocument }) {
   if (!document) return null;
   const set = (key, value) => setDocument({ ...document, [key]: value });
@@ -543,7 +555,11 @@ function ChangeSectionEditor({ document, setDocument }) {
       </div>
       <div className="form-grid">
         <Field label="Change title" span><input value={document.title || ""} onChange={(event) => set("title", event.target.value)} /></Field>
+        <Field label="Change type"><input value={document.change_type || ""} onChange={(event) => set("change_type", event.target.value)} /></Field>
+        <Field label="Workflow state"><input value={document.workflow_state || ""} onChange={(event) => set("workflow_state", event.target.value)} /></Field>
         <Field label="Planned change date"><input value={document.planned_change_date || ""} onChange={(event) => set("planned_change_date", event.target.value)} /></Field>
+        <Field label="Planned start"><input value={document.planned_start || ""} onChange={(event) => set("planned_start", event.target.value)} /></Field>
+        <Field label="Planned end"><input value={document.planned_end || ""} onChange={(event) => set("planned_end", event.target.value)} /></Field>
         <Field label="Customer"><input value={document.customer || ""} onChange={(event) => set("customer", event.target.value)} /></Field>
         <Field label="Environment" span><input value={document.environment || ""} onChange={(event) => set("environment", event.target.value)} /></Field>
         <Field label="Background of change" span><textarea rows="5" value={document.background || ""} onChange={(event) => set("background", event.target.value)} /></Field>
@@ -556,10 +572,75 @@ function ChangeSectionEditor({ document, setDocument }) {
         <Field label="Pre-change verification"><textarea rows="5" value={verification.pre_change.join("\n")} onChange={(event) => setVerification("pre_change", event.target.value)} /></Field>
         <Field label="In-change verification"><textarea rows="5" value={verification.in_change.join("\n")} onChange={(event) => setVerification("in_change", event.target.value)} /></Field>
         <Field label="Post-change verification" span><textarea rows="5" value={verification.post_change.join("\n")} onChange={(event) => setVerification("post_change", event.target.value)} /></Field>
-        <Field label="Risk and impact" span><textarea rows="4" value={document.risk_and_impact || ""} onChange={(event) => set("risk_and_impact", event.target.value)} /></Field>
+        <Field label="Risk"><textarea rows="3" value={document.risk || ""} onChange={(event) => set("risk", event.target.value)} /></Field>
+        <Field label="Impact"><textarea rows="3" value={document.impact || ""} onChange={(event) => set("impact", event.target.value)} /></Field>
+        <Field label="Risk and impact summary" span><textarea rows="4" value={document.risk_and_impact || ""} onChange={(event) => set("risk_and_impact", event.target.value)} /></Field>
+        <Field label="Risks and mitigations" hint="One per line: risk | mitigation" span>
+          <textarea rows="5" value={riskMitigationLines(document.risks_and_mitigations)} onChange={(event) => set("risks_and_mitigations", parseRiskMitigations(event.target.value))} />
+        </Field>
+        <Field label="Communication plan" hint="One communication action per line" span><textarea rows="4" value={(document.communication_plan || []).join("\n")} onChange={(event) => set("communication_plan", textLines(event.target.value))} /></Field>
         <Field label="Expected outcome" span><textarea rows="4" value={document.expected_outcome || ""} onChange={(event) => set("expected_outcome", event.target.value)} /></Field>
         <Field label="Success criteria" hint="One criterion per line" span><textarea rows="5" value={(document.success_criteria || []).join("\n")} onChange={(event) => set("success_criteria", textLines(event.target.value))} /></Field>
         <Field label="Dependencies" hint="One dependency per line" span><textarea rows="4" value={(document.dependencies || []).join("\n")} onChange={(event) => set("dependencies", textLines(event.target.value))} /></Field>
+        <Field label="Open questions for review" hint="These remain local review notes and are not rendered into the Freshdesk Description." span>
+          <textarea rows="4" value={(document.open_questions || []).join("\n")} onChange={(event) => set("open_questions", textLines(event.target.value))} />
+        </Field>
+      </div>
+    </div>
+  );
+}
+
+function ReviewList({ items, empty = "None", render = (item) => item }) {
+  if (!items?.length) return <span className="review-empty">{empty}</span>;
+  return <ul>{items.map((item, index) => <li key={`${JSON.stringify(item)}-${index}`}>{render(item)}</li>)}</ul>;
+}
+
+function ChangeGenerationReview({ review, fields }) {
+  if (!review) return null;
+  const labels = Object.fromEntries((fields || []).map((field) => [field.name, field.label || field.name]));
+  const mapped = Object.entries(review.freshdesk_fields?.custom_fields || {});
+  const summaryFields = Object.entries(review.freshdesk_fields || {})
+    .filter(([name, value]) => !["description", "custom_fields"].includes(name) && value != null && value !== "");
+  const validation = review.validation_preview || {};
+  return (
+    <div className="generation-review">
+      <div className="section-head">
+        <div><span className="eyebrow">Pre-save validation preview</span><h3>Review generated Freshdesk mapping</h3></div>
+        <Badge tone={validation.valid ? "good" : "alert"}>{validation.valid ? "Ready to save" : "Needs details"}</Badge>
+      </div>
+      <div className="review-grid">
+        <article className="review-card">
+          <strong>Auto-filled Freshdesk fields</strong>
+          <ReviewList
+            items={[...summaryFields, ...mapped]}
+            empty="No Freshdesk fields were auto-filled."
+            render={([name, value]) => <><b>{labels[name] || name}</b><span>{String(value)}</span></>}
+          />
+        </article>
+        <article className={cls("review-card", review.missing_required_fields?.length && "review-card-alert")}>
+          <strong>Missing required fields</strong>
+          <ReviewList
+            items={review.missing_required_fields}
+            empty="No missing required Freshdesk fields."
+            render={(field) => <><b>{field.label || field.name}</b><span>{field.type || "required field"}</span></>}
+          />
+        </article>
+        <article className={cls("review-card", review.open_questions?.length && "review-card-alert")}>
+          <strong>Open questions</strong>
+          <ReviewList items={review.open_questions} empty="No open questions." />
+        </article>
+        <article className={cls("review-card", review.tbd_fields?.length && "review-card-alert")}>
+          <strong>TBD values</strong>
+          <ReviewList items={review.tbd_fields} empty="No TBD values." />
+        </article>
+        <article className="review-card">
+          <strong>Field mapping notes</strong>
+          <ReviewList items={review.field_mapping_notes} empty="No mapping notes." />
+        </article>
+        <article className="review-card">
+          <strong>Low-confidence fields</strong>
+          <ReviewList items={review.low_confidence_fields} empty="No low-confidence mappings." render={(name) => labels[name] || name} />
+        </article>
       </div>
     </div>
   );
@@ -609,6 +690,15 @@ function TicketComposer({ kind, schema, refresh, notify, setModal, form, setForm
         change_document: result.change_document || current.change_document,
         assumptions: result.assumptions || [],
         skill_version: result.skill_version || "",
+        change_review: isChange ? {
+          freshdesk_fields: result.suggestions || {},
+          missing_required_fields: result.missing_required_fields || [],
+          open_questions: result.open_questions || [],
+          tbd_fields: result.tbd_fields || [],
+          field_mapping_notes: result.field_mapping_notes || [],
+          low_confidence_fields: result.low_confidence_fields || [],
+          validation_preview: result.validation_preview || {},
+        } : current.change_review,
         custom_fields: { ...current.custom_fields, ...(result.suggestions.custom_fields || {}) },
       }));
       setAssumptions(result.assumptions || []);
@@ -710,6 +800,7 @@ function TicketComposer({ kind, schema, refresh, notify, setModal, form, setForm
           {!isChange && <Field label="Description" span><textarea rows="14" value={form.description} onChange={(event) => set("description", event.target.value)} placeholder="Write the exact ticket description." /></Field>}
         </div>
         {isChange && form.change_document && <ChangeSectionEditor document={form.change_document} setDocument={setChangeDocument} />}
+        {isChange && <ChangeGenerationReview review={form.change_review} fields={fields} />}
         {customFields.length > 0 && (
           <div className="custom-fields">
             <h3>Discovered custom fields</h3>

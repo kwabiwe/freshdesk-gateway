@@ -131,11 +131,15 @@ Unsaved text remains available when you move between pages while the local web a
 
 ## Create A Change-Style Ticket
 
-Open **Change-style ticket** and paste your technical notes, relevant email text, and any prior plan. Select **Structure with local model**. The gateway uses its versioned local change-drafting skill to extract evidence, resolve relative dates against your local timezone, infer conservative operational detail, and flag assumptions for review.
+Open **Change-style ticket** and paste your technical notes, relevant email text, and any prior plan. Select **Structure with local model**. The gateway uses its versioned local change-drafting skill and your synced Freshdesk schema to extract evidence, resolve relative dates against your local timezone, infer conservative operational detail, and propose values for real Freshdesk fields.
+
+Before you save, the page separates auto-filled Freshdesk fields, missing required fields, assumptions, open questions, `TBD` values, low-confidence values, field-mapping notes, and the validation preview. Dropdown suggestions are accepted only when they match values discovered from Freshdesk. Review and correct these suggestions directly in the form.
 
 Edit the generated sections directly. The rich Freshdesk Description preview updates from the structured record through the backend renderer. The template covers:
 
-- Planned change date, customer, and environment
+- Change type and workflow state
+- Planned change date or start/end window
+- Customer and environment
 - Configuration items
 - Background of change
 - Change description
@@ -143,11 +147,13 @@ Edit the generated sections directly. The rich Freshdesk Description preview upd
 - Rollback branches
 - Pre-change, in-change, and post-change verification
 - Risk and impact
+- Risks and mitigations
+- Communication plan
 - Expected outcome
 - Success criteria
 - Dependencies
 
-Unsupported specifics remain `TBD` instead of being invented. Inferred Freshdesk dropdown values remain editable. Save the draft only after reviewing the assumptions and final preview. The server re-renders the Description when saving, then validates the exact payload before approval.
+Unsupported specifics remain `TBD` instead of being invented. Inferred Freshdesk dropdown values remain editable. Open questions stay in the local review panel and are not blindly added to the Freshdesk Description. Save the draft only after reviewing the assumptions, open questions, required-field preview, mapped fields, and final Description preview. The server re-renders the Description and re-runs deterministic mapping when saving, then validates the exact payload before approval.
 
 This creates a normal Freshdesk ticket after review and typed approval. The structured change record stays in local SQLite only. Configuration items, rollback, and verification are rendered into the Description because Freshdesk does not expose dedicated fields for them.
 
