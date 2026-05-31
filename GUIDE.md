@@ -41,6 +41,7 @@ MY_EMAIL=my.email@example.com
 APP_HOST=127.0.0.1
 APP_PORT=8787
 DRAFT_EXPIRY_MINUTES=30
+CHANGE_DRAFTING_SKILL=change_management_drafting
 ```
 
 Use the Freshdesk subdomain only for `FRESHDESK_DOMAIN`, unless you deliberately provide the full Freshdesk base URL. The `.env` file is excluded from Git.
@@ -62,6 +63,24 @@ For UI development:
 ```bash
 ./scripts/dev.sh
 ```
+
+## Private Tailnet Access
+
+The normal launcher keeps FastAPI bound to `127.0.0.1`. To reach the gateway from your other Tailnet devices without exposing it to the public internet or your local network, keep the gateway running and publish it privately through Tailscale Serve:
+
+```bash
+./scripts/tailnet-serve.sh
+```
+
+The script detects either a `tailscale` command on your path or the bundled macOS Tailscale app binary. It prints the private HTTPS URL to open from devices signed into your Tailnet.
+
+To remove the Tailnet route:
+
+```bash
+./scripts/tailnet-stop.sh
+```
+
+Do not use Tailscale Funnel for this gateway. Funnel would publish the service beyond your Tailnet.
 
 ## Connect A Local Model
 
@@ -134,6 +153,21 @@ This creates a normal Freshdesk ticket after review and typed approval. The stru
 
 Open **Settings & Help** to view the active read-only change skill version and section list.
 
+## Local Drafting Skills
+
+Local drafting instructions live under `skills/`. Each skill has its own folder and `skill.json` manifest:
+
+```text
+skills/
+  change_management_drafting/
+    skill.json
+    SKILL.md
+    TEMPLATE.md
+    examples/
+```
+
+The gateway discovers every manifest-backed folder through its local skill registry. `CHANGE_DRAFTING_SKILL` chooses the skill used by the change-style workflow. The active skill and discovered catalogue appear in **Settings & Help**. Additional workflows can select different registered skills later without replacing the change-management instructions.
+
 ## Create Batch Tickets
 
 Open **Batch tickets** and paste CSV, tab-separated table text, pipe-separated text, or a JSON array. Include a header row. Common new-user headers are:
@@ -204,7 +238,7 @@ Open **Related tickets** and run the constrained search. The gateway uses `MY_NA
 
 ## Optional OpenClaw Integration Later
 
-OpenClaw is not required. A later local-only adapter can call the existing REST API at `http://127.0.0.1:8787/api`.
+OpenClaw is not required. A later local-only adapter can call the existing REST API at `http://127.0.0.1:8787/api`, or the private Tailscale Serve URL when the adapter runs on another Tailnet device.
 
 Safe endpoint families already exist for health, stop/resume, schema sync, directory lookups, drafting, validation, approval, selected batch creation, related-ticket listing, local-model summarisation, and audit viewing.
 
@@ -213,7 +247,7 @@ Do not add an arbitrary Freshdesk passthrough endpoint. Do not expose the API ke
 ## Security Considerations
 
 - Keep `.env`, `STOP`, `data/`, and `.venv/` local.
-- Bind the app to `127.0.0.1`, not a public interface.
+- Keep the app bound to `127.0.0.1`. Use the private Tailscale Serve wrapper for Tailnet access instead of binding FastAPI to a public or LAN-facing interface.
 - Treat your personal Freshdesk API key like a password.
 - Review drafts for confidential information before approval.
 - Keep the model server local unless you deliberately redesign the threat model.

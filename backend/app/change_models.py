@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 
 def _strings(value: Any) -> list[str]:
@@ -17,8 +17,10 @@ def _strings(value: Any) -> list[str]:
 
 class ConfigurationItem(BaseModel):
     name: str = "TBD"
-    site_location: str = ""
-    purpose: str = ""
+    item_type: str = Field(default="", validation_alias=AliasChoices("item_type", "type"))
+    site_location: str = Field(default="", validation_alias=AliasChoices("site_location", "site_or_environment"))
+    purpose: str = Field(default="", validation_alias=AliasChoices("purpose", "role_in_change"))
+    version: str = ""
 
 
 class RollbackBranch(BaseModel):

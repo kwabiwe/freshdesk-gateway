@@ -26,13 +26,15 @@ def render_change_html(document: ChangeDocument) -> str:
     ]
     if document.configuration_items:
         rows = "".join(
-            f"<tr><td>{_text(item.name)}</td><td>{_text(item.site_location)}</td><td>{_text(item.purpose)}</td></tr>"
+            f"<tr><td>{_text(item.name)}</td><td>{_text(item.item_type)}</td><td>{_text(item.site_location)}</td>"
+            f"<td>{_text(item.purpose)}</td><td>{_text(item.version)}</td></tr>"
             for item in document.configuration_items
         )
         parts.append(
             _section(
                 "Configuration items",
-                "<table><thead><tr><th>Configuration item</th><th>Site / location</th><th>Purpose</th></tr></thead>"
+                "<table><thead><tr><th>Configuration item</th><th>Type</th><th>Site / environment</th>"
+                "<th>Role in change</th><th>Version</th></tr></thead>"
                 f"<tbody>{rows}</tbody></table>",
             )
         )

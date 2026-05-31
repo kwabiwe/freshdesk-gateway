@@ -10,9 +10,9 @@ from fastapi import HTTPException
 
 from .change_models import ChangeDocument
 from .change_renderer import render_change_html
-from .change_skill import ChangeSkill
 from .local_llm_client import LocalLLMClient
 from .schema_cache import SchemaCache
+from .skill_registry import LocalSkill, SkillRegistry
 from .ticket_defaults import TicketDefaultsService
 
 
@@ -26,13 +26,13 @@ class ChangeService:
         local_llm: LocalLLMClient,
         schema: SchemaCache,
         defaults: TicketDefaultsService,
-        skill: ChangeSkill | None = None,
+        skill: LocalSkill | None = None,
         now_provider=None,
     ):
         self.local_llm = local_llm
         self.schema = schema
         self.defaults = defaults
-        self.skill = skill or ChangeSkill()
+        self.skill = skill or SkillRegistry().get("change_management_drafting")
         self.now_provider = now_provider or (lambda: datetime.now().astimezone())
 
     @staticmethod
@@ -97,7 +97,15 @@ class ChangeService:
             "planned_change_date": "string",
             "customer": "string",
             "environment": "string",
-            "configuration_items": [{"name": "string", "site_location": "string", "purpose": "string"}],
+            "configuration_items": [
+                {
+                    "name": "string",
+                    "item_type": "string",
+                    "site_location": "string",
+                    "purpose": "string",
+                    "version": "string",
+                }
+            ],
             "background": "string",
             "change_description": "string",
             "implementation_steps": ["string"],
@@ -252,7 +260,8 @@ class ChangeService:
                 "rendered_description": suggestions["description"],
                 "suggestions": suggestions,
                 "assumptions": assumptions,
-                "skill_version": self.skill.VERSION,
+                "skill_id": self.skill.skill_id,
+                "skill_version": self.skill.version,
             }
         document = self._document(raw, notes)
         self._resolve_relative_date(notes, document)
@@ -262,11 +271,16 @@ class ChangeService:
             "rendered_description": suggestions["description"],
             "suggestions": suggestions,
             "assumptions": assumptions,
-            "skill_version": self.skill.VERSION,
+            "skill_id": self.skill.skill_id,
+            "skill_version": self.skill.version,
         }
 
     def render(self, document: ChangeDocument) -> dict[str, Any]:
-        return {"rendered_description": render_change_html(document), "skill_version": self.skill.VERSION}
+        return {
+            "rendered_description": render_change_html(document),
+            "skill_id": self.skill.skill_id,
+            "skill_version": self.skill.version,
+        }
 
     def prepare_draft(self, values: dict[str, Any]) -> tuple[dict[str, Any], str]:
         document_value = values.get("change_document")
@@ -280,6 +294,7 @@ class ChangeService:
         stored = {
             "change_document": document.model_dump(),
             "assumptions": values.get("assumptions", []),
-            "skill_version": values.get("skill_version") or self.skill.VERSION,
+            "skill_id": self.skill.skill_id,
+            "skill_version": values.get("skill_version") or self.skill.version,
         }
         return values, json.dumps(stored)

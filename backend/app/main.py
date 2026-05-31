@@ -11,7 +11,6 @@ from fastapi.staticfiles import StaticFiles
 from .audit import AuditLog
 from .change_models import ChangeRenderRequest, ChangeSuggestionRequest
 from .change_service import ChangeService
-from .change_skill import ChangeSkill
 from .config import Settings, load_settings
 from .database import Database
 from .draft_assistant import DraftAssistantService
@@ -36,6 +35,7 @@ from .rate_limit import RateLimiter
 from .related_tickets import RelatedTicketsService
 from .schema_cache import SchemaCache
 from .schema_service import SchemaService
+from .skill_registry import SkillRegistry
 from .ticket_templates import render_change_description
 from .ticket_defaults import TicketDefaultsService
 from .validators import TicketValidator
@@ -62,7 +62,8 @@ class Services:
         self.schema = SchemaService(self.freshdesk, self.schema_cache, self.audit)
         self.defaults = TicketDefaultsService(self.schema_cache, settings_provider)
         self.assistant = DraftAssistantService(self.local_llm, self.schema_cache, self.defaults)
-        self.change_skill = ChangeSkill()
+        self.skill_registry = SkillRegistry()
+        self.change_skill = self.skill_registry.get(base_settings.change_drafting_skill)
         self.changes = ChangeService(self.local_llm, self.schema_cache, self.defaults, self.change_skill)
         self.related = RelatedTicketsService(self.freshdesk, self.schema_cache, settings_provider, self.audit)
 
@@ -221,6 +222,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/local-llm/change-skill")
     def local_llm_change_skill():
         return services.change_skill.overview()
+
+    @app.get("/api/local-llm/skills")
+    def local_llm_skills():
+        return {"active_change_skill": services.change_skill.skill_id, "skills": services.skill_registry.list()}
+
+    @app.get("/api/local-llm/skills/{skill_id}")
+    def local_llm_skill(skill_id: str):
+        try:
+            return services.skill_registry.get(skill_id).overview()
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/api/tickets/render-change")
     def ticket_render_change(body: ChangeRenderRequest):

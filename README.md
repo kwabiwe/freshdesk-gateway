@@ -24,6 +24,14 @@ Edit `.env`, then start the app:
 
 Open [http://127.0.0.1:8787](http://127.0.0.1:8787).
 
+To publish the loopback-only gateway privately to devices on your Tailnet:
+
+```bash
+./scripts/tailnet-serve.sh
+```
+
+The script prints the private Tailscale HTTPS URL. It does not expose the app to the public internet or your local network.
+
 For frontend development with hot reload:
 
 ```bash
@@ -42,5 +50,6 @@ The Vite frontend runs at [http://127.0.0.1:5173](http://127.0.0.1:5173) and pro
 - A `STOP` file blocks all Freshdesk operations immediately.
 - Audit records stay in local SQLite.
 - No Freshdesk note, tag, text, or marker indicates automation or AI use.
+- Tailnet access uses private Tailscale Serve publishing while FastAPI remains bound to loopback.
 
 See [GUIDE.md](GUIDE.md) for configuration, workflows, troubleshooting, and the optional later OpenClaw interface.

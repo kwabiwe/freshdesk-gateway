@@ -503,7 +503,7 @@ function textLines(value) {
 }
 
 function configurationItemLines(items) {
-  return (items || []).map((item) => [item.name, item.site_location, item.purpose].join(" | ")).join("\n");
+  return (items || []).map((item) => [item.name, item.item_type, item.site_location, item.purpose, item.version].join(" | ")).join("\n");
 }
 
 function rollbackLines(branches) {
@@ -512,8 +512,8 @@ function rollbackLines(branches) {
 
 function parseConfigurationItems(value) {
   return textLines(value).map((line) => {
-    const [name = "TBD", site_location = "", purpose = ""] = line.split("|").map((item) => item.trim());
-    return { name, site_location, purpose };
+    const [name = "TBD", item_type = "", site_location = "", purpose = "", version = ""] = line.split("|").map((item) => item.trim());
+    return { name, item_type, site_location, purpose, version };
   });
 }
 
@@ -548,7 +548,7 @@ function ChangeSectionEditor({ document, setDocument }) {
         <Field label="Environment" span><input value={document.environment || ""} onChange={(event) => set("environment", event.target.value)} /></Field>
         <Field label="Background of change" span><textarea rows="5" value={document.background || ""} onChange={(event) => set("background", event.target.value)} /></Field>
         <Field label="Change description" span><textarea rows="5" value={document.change_description || ""} onChange={(event) => set("change_description", event.target.value)} /></Field>
-        <Field label="Configuration items" hint="One per line: name | site or location | purpose" span>
+        <Field label="Configuration items" hint="One per line: name | type | site or environment | role in change | version" span>
           <textarea rows="5" value={configurationItemLines(document.configuration_items)} onChange={(event) => set("configuration_items", parseConfigurationItems(event.target.value))} />
         </Field>
         <Field label="Implementation steps" hint="One ordered step per line" span><textarea rows="8" value={(document.implementation_steps || []).join("\n")} onChange={(event) => set("implementation_steps", textLines(event.target.value))} /></Field>
@@ -1073,6 +1073,7 @@ function AuditPage({ audit, setAudit, notify }) {
 function SettingsPage({ notify, refresh }) {
   const [settings, setSettings] = useState(null);
   const [changeSkill, setChangeSkill] = useState(null);
+  const [skillRegistry, setSkillRegistry] = useState(null);
   const [models, setModels] = useState([]);
   const [modelProvider, setModelProvider] = useState("");
   const [directoryQuery, setDirectoryQuery] = useState("");
@@ -1093,6 +1094,7 @@ function SettingsPage({ notify, refresh }) {
   useEffect(() => {
     request("/settings").then(setSettings).catch((error) => notify("error", error.message));
     request("/local-llm/change-skill").then(setChangeSkill).catch((error) => notify("error", error.message));
+    request("/local-llm/skills").then(setSkillRegistry).catch((error) => notify("error", error.message));
     loadModels();
   }, [loadModels, notify]);
 
@@ -1195,6 +1197,7 @@ function SettingsPage({ notify, refresh }) {
             <Badge>Version {changeSkill.version}</Badge>
           </div>
           <p>{changeSkill.summary}</p>
+          <p>Active local skill: <code>{changeSkill.id}</code>. Add future skills as manifest-backed folders under <code>skills/</code>.</p>
           <div className="skill-sections">
             {changeSkill.sections.map((section) => <span key={section}>{section}</span>)}
           </div>
@@ -1202,6 +1205,17 @@ function SettingsPage({ notify, refresh }) {
             <summary>View active instructions</summary>
             <pre>{changeSkill.instructions}</pre>
           </details>
+          {skillRegistry?.skills?.length > 0 && (
+            <>
+              <h3>Discovered local skills</h3>
+              {skillRegistry.skills.map((skill) => (
+                <div className="schema-line" key={skill.id}>
+                  <strong>{skill.name}</strong>
+                  <span>{skill.id} · v{skill.version}</span>
+                </div>
+              ))}
+            </>
+          )}
         </section>
       )}
     </div>

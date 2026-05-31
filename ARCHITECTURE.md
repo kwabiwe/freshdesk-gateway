@@ -15,6 +15,10 @@ Browser UI
   -> local FastAPI REST API
     -> deterministic sensitive-data validation
       -> optional local model API
+
+Tailnet device
+  -> private Tailscale Serve HTTPS route
+    -> loopback-only FastAPI REST API
 ```
 
 The browser never receives the Freshdesk API key. Every future interface, including an optional OpenClaw adapter, should use the same local REST API and safety controls.
@@ -39,7 +43,7 @@ The browser never receives the Freshdesk API key. Every future interface, includ
 | `ticket_defaults.py` | Editable identity and schema-aware defaults |
 | `draft_assistant.py` | Schema-constrained local-model ticket suggestions |
 | `change_models.py` | Authoritative structured change-document schema |
-| `change_skill.py` | Versioned local Markdown skill loader |
+| `skill_registry.py` | Discovers manifest-backed local drafting skill folders |
 | `change_renderer.py` | Escaped rich HTML Freshdesk Description renderer |
 | `change_service.py` | Dedicated structured change generation and schema mapping |
 | `related_tickets.py` | Constrained identity-based Freshdesk ticket lookup |
@@ -78,6 +82,14 @@ SQLite stores:
 - Draft payloads, local structured change records, validation results, expiry, batch IDs, and created ticket IDs
 
 The local `STOP` file is the emergency override even if SQLite is unavailable or the browser is closed.
+
+## Local Skills
+
+Versioned local drafting instructions live in `skills/<skill-id>/`. Each folder has a `skill.json` manifest, `SKILL.md`, `TEMPLATE.md`, and optional examples. Workflows select a registered skill by ID instead of binding the application to one global instruction file.
+
+## Tailnet Access
+
+FastAPI remains bound to `127.0.0.1`. `scripts/tailnet-serve.sh` publishes that loopback service through Tailscale Serve for private Tailnet access. The gateway must not use Tailscale Funnel or bind broadly to LAN interfaces by default.
 
 ## Extension Rule
 

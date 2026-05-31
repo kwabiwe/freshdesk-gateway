@@ -16,7 +16,6 @@ from app.audit import AuditLog
 from app.change_models import ChangeDocument
 from app.change_renderer import render_change_html
 from app.change_service import ChangeService
-from app.change_skill import ChangeSkill
 from app.config import Settings, load_settings
 from app.database import Database
 from app.draft_assistant import DraftAssistantService
@@ -30,6 +29,7 @@ from app.rate_limit import RateLimiter
 from app.schema_cache import SchemaCache
 from app.schema_service import SchemaService
 from app.sensitive_data import detect_secrets
+from app.skill_registry import SkillRegistry
 from app.ticket_defaults import TicketDefaultsService
 from app.validators import TicketValidator
 
@@ -431,10 +431,10 @@ def wise_change_document():
         "customer": "Wise UK",
         "environment": "Production HSM environment",
         "configuration_items": [
-            {"name": "wiseld5-hsm-1", "site_location": "LD5", "purpose": "HSM"},
-            {"name": "wiseld5-hsm-2", "site_location": "LD5", "purpose": "HSM"},
-            {"name": "wiseld8-hsm-1", "site_location": "LD8", "purpose": "HSM"},
-            {"name": "wiseld8-hsm-2", "site_location": "LD8", "purpose": "HSM"},
+            {"name": "wiseld5-hsm-1", "item_type": "HSM", "site_location": "LD5", "purpose": "Firmware upgrade", "version": "Target 2.3a"},
+            {"name": "wiseld5-hsm-2", "item_type": "HSM", "site_location": "LD5", "purpose": "Firmware upgrade", "version": "Target 2.3a"},
+            {"name": "wiseld8-hsm-1", "item_type": "HSM", "site_location": "LD8", "purpose": "Firmware upgrade", "version": "Target 2.3a"},
+            {"name": "wiseld8-hsm-2", "item_type": "HSM", "site_location": "LD8", "purpose": "Firmware upgrade", "version": "Target 2.3a"},
         ],
         "background": "Upgrade firmware to version 2.3a to resolve the mTLS-related bug before rollout.",
         "change_description": "Upgrade the four HSMs to 2.3a and roll out mTLS using a phased LD5-first approach.",
@@ -492,6 +492,61 @@ def test_change_skill_wise_uk_fixture_maps_full_document(core, settings: Setting
     assert "2.3a" in result["rendered_description"]
     assert "mTLS" in result["rendered_description"]
     assert "Tuesday 2 June 2026" in result["assumptions"][0]
+    assert result["skill_id"] == "change_management_drafting"
+    assert result["skill_version"] == "2.0.0"
+
+
+def test_skill_registry_discovers_manifest_backed_change_skill():
+    registry = SkillRegistry()
+    skills = registry.list()
+    assert skills == [
+        {
+            "id": "change_management_drafting",
+            "name": "Change Management Drafting",
+            "version": "2.0.0",
+            "summary": "Convert sparse operational notes and pasted evidence into a complete, approval-ready change record.",
+            "sections": [
+                "Title",
+                "Planned change date",
+                "Customer / environment",
+                "Configuration items",
+                "Background",
+                "Change description",
+                "Implementation steps",
+                "Rollback plan",
+                "Verification plan",
+                "Risk and impact",
+                "Expected outcome",
+                "Success criteria",
+                "Dependencies",
+                "Assumptions requiring review",
+            ],
+        }
+    ]
+    skill = registry.get("change_management_drafting")
+    assert "Use clear British English." in skill.instructions()
+    assert skill.overview()["version"] == "2.0.0"
+
+
+def test_configuration_item_accepts_improved_skill_field_aliases():
+    document = ChangeDocument.model_validate(
+        {
+            "configuration_items": [
+                {
+                    "name": "wiseld5-hsm-1",
+                    "type": "HSM",
+                    "site_or_environment": "LD5 / Production",
+                    "role_in_change": "Target firmware upgrade",
+                    "version": "2.3a",
+                }
+            ]
+        }
+    )
+    item = document.configuration_items[0]
+    assert item.item_type == "HSM"
+    assert item.site_location == "LD5 / Production"
+    assert item.purpose == "Target firmware upgrade"
+    assert item.version == "2.3a"
 
 
 def test_change_renderer_escapes_unsafe_text_and_omits_assumptions():

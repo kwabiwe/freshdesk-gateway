@@ -1,0 +1,24 @@
+{
+  "id": "change_management_drafting",
+  "name": "Change Management Drafting",
+  "version": "2.0.0",
+  "summary": "Convert sparse operational notes and pasted evidence into a complete, approval-ready change record.",
+  "instruction_file": "SKILL.md",
+  "template_file": "TEMPLATE.md",
+  "sections": [
+    "Title",
+    "Planned change date",
+    "Customer / environment",
+    "Configuration items",
+    "Background",
+    "Change description",
+    "Implementation steps",
+    "Rollback plan",
+    "Verification plan",
+    "Risk and impact",
+    "Expected outcome",
+    "Success criteria",
+    "Dependencies",
+    "Assumptions requiring review"
+  ]
+}
