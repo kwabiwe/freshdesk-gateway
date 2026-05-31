@@ -1,0 +1,10 @@
+Next Tuesday, on the 2nd of June, I am carrying out a change for Wise UK to update their HSMs and roll out mTLS to:
+
+wiseld5-hsm-1
+wiseld5-hsm-2
+wiseld8-hsm-1
+wiseld8-hsm-2
+
+The HSM software image upgrades the devices to version 2.3a to resolve the mTLS bug. The download folder includes MD5 hashes for file verification.
+
+Upgrade the LD5 HSMs first because TLS certificates are already loaded on those devices. Upgrade one HSM with guidance, add the upgraded HSM to a separate load balancer, release the Stargate version that can send commands to the separate HSM, and test all commands. If successful, upgrade another HSM and add upgraded HSMs to the main load balancer. Confirm production-scenario commands, then upgrade the remaining HSMs and add them to the pool.

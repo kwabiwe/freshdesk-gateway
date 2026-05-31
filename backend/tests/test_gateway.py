@@ -1,0 +1,604 @@
+from __future__ import annotations
+
+import base64
+import json
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import httpx
+import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+
+from app.audit import AuditLog
+from app.change_models import ChangeDocument
+from app.change_renderer import render_change_html
+from app.change_service import ChangeService
+from app.change_skill import ChangeSkill
+from app.config import Settings, load_settings
+from app.database import Database
+from app.draft_assistant import DraftAssistantService
+from app.draft_store import DraftStore
+from app.emergency import EmergencyStop
+from app.freshdesk_client import FreshdeskClient
+from app.main import create_app
+from app.local_llm_client import LocalLLMClient
+from app.ollama_client import OllamaClient
+from app.rate_limit import RateLimiter
+from app.schema_cache import SchemaCache
+from app.schema_service import SchemaService
+from app.sensitive_data import detect_secrets
+from app.ticket_defaults import TicketDefaultsService
+from app.validators import TicketValidator
+
+
+@pytest.fixture
+def settings(tmp_path: Path) -> Settings:
+    return Settings(
+        freshdesk_domain="example",
+        freshdesk_api_key="personal-key",
+        ollama_url="http://127.0.0.1:11434",
+        ollama_model="llama3.1",
+        local_llm_provider="auto",
+        ollama_generation_timeout_seconds=300,
+        max_writes_per_hour=5,
+        max_reads_per_hour=60,
+        max_ticket_creations_per_hour=5,
+        my_name="Test User",
+        my_email="test@example.com",
+        app_host="127.0.0.1",
+        app_port=8787,
+        draft_expiry_minutes=30,
+        database_path=tmp_path / "gateway.db",
+        stop_file=tmp_path / "STOP",
+    )
+
+
+@pytest.fixture
+def core(settings: Settings):
+    db = Database(settings.database_path)
+    audit = AuditLog(db)
+    emergency = EmergencyStop(settings.stop_file, audit)
+    limiter = RateLimiter(db, lambda: settings, audit)
+    schema = SchemaCache(db, audit)
+    drafts = DraftStore(db, lambda: settings, TicketValidator(schema), audit)
+    return db, audit, emergency, limiter, schema, drafts
+
+
+def test_config_loading(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("FRESHDESK_DOMAIN", "acme")
+    monkeypatch.setenv("FRESHDESK_API_KEY", "secret")
+    monkeypatch.setenv("MAX_WRITES_PER_HOUR", "7")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "config.db"))
+    loaded = load_settings(tmp_path / "missing.env")
+    assert loaded.freshdesk_base_url == "https://acme.freshdesk.com"
+    assert loaded.max_writes_per_hour == 7
+    assert "freshdesk_api_key" not in loaded.safe_dict()
+
+
+def test_freshdesk_auth_header():
+    expected = base64.b64encode(b"abc123:X").decode("ascii")
+    assert FreshdeskClient.build_auth_header("abc123") == f"Basic {expected}"
+
+
+def test_emergency_stop_active_and_resume(core):
+    _, _, emergency, _, _, _ = core
+    assert emergency.is_active() is False
+    emergency.activate("STOP")
+    assert emergency.is_active() is True
+    with pytest.raises(HTTPException) as exc:
+        emergency.require_clear()
+    assert exc.value.status_code == 423
+    emergency.resume("RESUME")
+    assert emergency.is_active() is False
+
+
+def test_rate_limit_blocks_after_maximum(core, settings: Settings):
+    _, _, _, limiter, _, _ = core
+    limited = replace(settings, max_writes_per_hour=2, max_ticket_creations_per_hour=2)
+    limiter.settings_provider = lambda: limited
+    limiter.record("write", "ticket_create")
+    limiter.record("write", "ticket_create")
+    with pytest.raises(HTTPException) as exc:
+        limiter.ensure_available("write", "ticket_create")
+    assert exc.value.status_code == 429
+
+
+def test_draft_creation_validation_and_expiry(core):
+    db, _, _, _, schema, drafts = core
+    schema.put("ticket_fields", [{"name": "group", "label": "Group", "type": "default_group", "required_for_agents": True}])
+    draft = drafts.create({"subject": "Subject", "description": "Body", "requester_email": "requester@example.com"})
+    assert draft["validation_status"] == "invalid"
+    assert draft["validation_result"]["missing_fields"][0]["label"] == "Group"
+    drafts.update(draft["draft_id"], {"group_id": 123})
+    assert drafts.get(draft["draft_id"])["validation_status"] == "valid"
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE drafts SET expires_at = ? WHERE draft_id = ?",
+            ((datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(), draft["draft_id"]),
+        )
+    assert drafts.get(draft["draft_id"])["expired"] is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "password=hunter2",
+        "Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456",
+        "-----BEGIN PRIVATE KEY-----",
+        "postgres://user:supersecret@localhost/db",
+        "api_key=abcdefghijklmno123456",
+    ],
+)
+def test_sensitive_data_detection(text: str):
+    assert detect_secrets(text)
+
+
+def test_batch_csv_and_json_parsing():
+    csv_rows = DraftStore.parse_rows("name,email\nAda,ada@example.com\nLin,lin@example.com")
+    json_rows = DraftStore.parse_rows('[{"name":"Ada","email":"ada@example.com"}]')
+    assert csv_rows[0]["name"] == "Ada"
+    assert json_rows[0]["email"] == "ada@example.com"
+
+
+def test_audit_logging_redacts_secrets(core):
+    _, audit, _, _, _, _ = core
+    audit.record("test", request_summary="password=hunter2")
+    row = audit.list()[0]
+    assert "hunter2" not in row["request_summary"]
+    assert "[REDACTED]" in row["request_summary"]
+
+
+def test_ollama_unavailable_fallback(core, settings: Settings):
+    _, audit, _, _, _, _ = core
+    transport = httpx.MockTransport(lambda request: httpx.Response(503, request=request))
+    ollama = OllamaClient(lambda: settings, audit, transport=transport)
+    assert ollama.test_connection()["connected"] is False
+    with pytest.raises(HTTPException) as exc:
+        ollama.rewrite("Plain notes")
+    assert exc.value.status_code == 503
+
+
+def test_ollama_timeout_has_accurate_message(core, settings: Settings):
+    _, audit, _, _, _, _ = core
+
+    def timeout_handler(request: httpx.Request):
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    ollama = OllamaClient(lambda: settings, audit, transport=httpx.MockTransport(timeout_handler))
+    with pytest.raises(HTTPException) as exc:
+        ollama.rewrite("Plain notes")
+    assert exc.value.status_code == 504
+    assert "exceeded 300 seconds" in exc.value.detail
+
+
+def test_local_llm_discovers_ollama_models_and_generates(core, settings: Settings):
+    _, audit, _, _, _, _ = core
+
+    def handler(request: httpx.Request):
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "gemma4:31b"}, {"name": "mistral-small3.1:24b"}]}, request=request)
+        payload = json.loads(request.content)
+        assert request.url.path == "/api/generate"
+        assert payload["model"] == "llama3.1"
+        return httpx.Response(200, json={"response": "Rewritten body"}, request=request)
+
+    local_llm = LocalLLMClient(lambda: settings, audit, transport=httpx.MockTransport(handler))
+    result = local_llm.test_connection()
+    assert result["provider"] == "ollama"
+    assert result["available_models"] == ["gemma4:31b", "mistral-small3.1:24b"]
+    assert local_llm.rewrite("Plain notes") == "Rewritten body"
+
+
+def test_local_llm_supports_openai_compatible_server(core, settings: Settings):
+    _, audit, _, _, _, _ = core
+    compatible = replace(settings, ollama_url="http://127.0.0.1:1234", local_llm_provider="openai-compatible")
+
+    def handler(request: httpx.Request):
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "local-model"}]}, request=request)
+        assert request.url.path == "/v1/chat/completions"
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Local response"}}]}, request=request)
+
+    local_llm = LocalLLMClient(lambda: compatible, audit, transport=httpx.MockTransport(handler))
+    assert local_llm.list_models()["models"] == ["local-model"]
+    assert local_llm.rewrite("Plain notes") == "Local response"
+
+
+def test_freshdesk_client_constructs_ticket_request(core, settings: Settings):
+    _, audit, emergency, limiter, _, _ = core
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request):
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        captured["authorization"] = request.headers["Authorization"]
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"id": 42}, request=request)
+
+    client = FreshdeskClient(lambda: settings, emergency, limiter, audit, transport=httpx.MockTransport(handler))
+    result = client.create_ticket({"subject": "Safe ticket"})
+    assert result["id"] == 42
+    assert captured["url"] == "https://example.freshdesk.com/api/v2/tickets"
+    assert captured["authorization"] == FreshdeskClient.build_auth_header("personal-key")
+    assert captured["body"] == {"subject": "Safe ticket"}
+
+
+def test_freshdesk_ticket_forms_uses_documented_hyphenated_path(core, settings: Settings):
+    _, audit, emergency, limiter, _, _ = core
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request):
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json=[], request=request)
+
+    client = FreshdeskClient(lambda: settings, emergency, limiter, audit, transport=httpx.MockTransport(handler))
+    client.ticket_forms()
+    assert captured["url"] == "https://example.freshdesk.com/api/v2/ticket-forms"
+
+
+def test_freshdesk_contact_and_company_search_use_autocomplete_endpoints(core, settings: Settings):
+    _, audit, emergency, limiter, _, _ = core
+    urls: list[str] = []
+
+    def handler(request: httpx.Request):
+        urls.append(str(request.url))
+        payload = {"companies": [{"id": 7, "name": "Acme"}]} if "companies" in request.url.path else [{"id": 8, "name": "Ada"}]
+        return httpx.Response(200, json=payload, request=request)
+
+    client = FreshdeskClient(lambda: settings, emergency, limiter, audit, transport=httpx.MockTransport(handler))
+    assert client.search_contacts("Ada")[0]["name"] == "Ada"
+    assert client.search_companies("Acme")[0]["name"] == "Acme"
+    assert urls == [
+        "https://example.freshdesk.com/api/v2/contacts/autocomplete?term=Ada",
+        "https://example.freshdesk.com/api/v2/companies/autocomplete?name=Acme",
+    ]
+
+
+def test_freshdesk_email_contact_search_uses_exact_email_filter(core, settings: Settings):
+    _, audit, emergency, limiter, _, _ = core
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request):
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json=[{"id": 8, "email": "ada@example.com"}], request=request)
+
+    client = FreshdeskClient(lambda: settings, emergency, limiter, audit, transport=httpx.MockTransport(handler))
+    assert client.search_contacts("ada@example.com")[0]["id"] == 8
+    assert captured["url"] == "https://example.freshdesk.com/api/v2/contacts?email=ada%40example.com"
+
+
+def test_schema_sync_falls_back_to_ticket_field_group_and_agent_choices(core):
+    _, audit, _, _, schema, _ = core
+
+    class StubFreshdesk:
+        def ticket_fields(self):
+            return [
+                {"name": "group", "choices": {"L1 Operations": 10}},
+                {"name": "agent", "choices": {"Test User": 20}},
+            ]
+
+        def groups(self):
+            raise HTTPException(status_code=403, detail="forbidden")
+
+        def agents(self):
+            raise HTTPException(status_code=403, detail="forbidden")
+
+        def companies(self):
+            return []
+
+        def ticket_forms(self):
+            raise HTTPException(status_code=404, detail="missing")
+
+    result = SchemaService(StubFreshdesk(), schema, audit).sync()
+    assert result["resources"]["groups"]["status"] == "fallback"
+    assert schema.get("groups") == [{"id": 10, "name": "L1 Operations", "source": "ticket_fields"}]
+    assert result["resources"]["agents"]["status"] == "fallback"
+    assert schema.get("agents")[0]["contact"]["name"] == "Test User"
+    assert result["resources"]["ticket_forms"]["error"].startswith("Ticket forms are not exposed")
+
+
+def test_ticket_defaults_use_configured_identity_and_cached_schema(core, settings: Settings):
+    _, _, _, _, schema, _ = core
+    schema.put(
+        "ticket_fields",
+        [
+            {"name": "cf_requested_by"},
+            {"name": "cf_change_owner"},
+            {"name": "cf_form2", "choices": ["Change Request", "Incident"]},
+            {"name": "cf_change_type", "choices": ["Standard", "Normal", "Emmergency"]},
+            {"name": "cf_change_state", "choices": ["Pending approval", "Approved"]},
+            {"name": "cf_customer", "choices": ["Example"]},
+        ],
+    )
+    schema.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
+    schema.put("agents", [{"id": 8, "contact": {"name": "Test User", "email": "test@example.com"}}])
+    schema.put("groups", [{"id": 9, "name": "L3 Engineering"}])
+    defaults = TicketDefaultsService(schema, lambda: settings).defaults("change")
+    assert defaults["requester_email"] == "test@example.com"
+    assert defaults["company_id"] == 7
+    assert defaults["group_id"] == 9
+    assert defaults["identity"]["agent_id"] == 8
+    assert defaults["custom_fields"] == {
+        "cf_requested_by": "Test User",
+        "cf_customer": "Example",
+        "cf_change_owner": "Test User",
+        "cf_form2": "Change Request",
+        "cf_change_type": "Normal",
+        "cf_change_state": "Pending approval",
+    }
+
+
+def test_draft_assistant_accepts_only_cached_schema_values(core, settings: Settings):
+    _, _, _, _, schema, _ = core
+    schema.put("ticket_fields", [{"name": "cf_business_impact", "choices": ["Minor", "Moderate"]}])
+    schema.put("groups", [{"id": 5, "name": "Operations"}])
+    schema.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
+
+    class StubLocalLLM:
+        def generate_json(self, prompt, source_text):
+            return {
+                "subject": "Reviewed subject",
+                "description": "Reviewed description",
+                "priority": 2,
+                "group_name": "Operations",
+                "company_name": "Example Limited",
+                "custom_fields": {"cf_business_impact": "Minor", "cf_unknown": "ignored"},
+                "assumptions": ["Business impact is minor."],
+            }
+
+    defaults = TicketDefaultsService(schema, lambda: settings)
+    result = DraftAssistantService(StubLocalLLM(), schema, defaults).suggest("generic", "Notes")
+    assert result["suggestions"]["group_id"] == 5
+    assert result["suggestions"]["company_id"] == 7
+    assert result["suggestions"]["custom_fields"] == {"cf_business_impact": "Minor"}
+    assert result["assumptions"] == ["Business impact is minor."]
+
+
+def test_change_assistant_defaults_minor_impact_and_rejects_undiscovered_type(core, settings: Settings):
+    _, _, _, _, schema, _ = core
+    schema.put("ticket_fields", [{"name": "cf_chg_business_impact", "label": "CHG Business Impact", "choices": ["Moderate", "Significant", "Minor"]}])
+
+    class StubLocalLLM:
+        def generate_json(self, prompt, source_text):
+            return {"subject": "Change", "description": "Risk: Low", "type": "Request", "custom_fields": {}, "assumptions": []}
+
+    defaults = TicketDefaultsService(schema, lambda: settings)
+    result = DraftAssistantService(StubLocalLLM(), schema, defaults).suggest("change", "Low expected disruption.")
+    assert "type" not in result["suggestions"]
+    assert result["suggestions"]["custom_fields"] == {"cf_chg_business_impact": "Minor"}
+    assert result["assumptions"] == ["Business impact fields default to Minor because the notes describe low or minimal disruption."]
+
+
+def test_change_assistant_populates_description_background_group_and_normal_type(core, settings: Settings):
+    _, _, _, _, schema, _ = core
+    schema.put(
+        "ticket_fields",
+        [
+            {"name": "cf_background_for_the_change", "label": "Background for the Change"},
+            {"name": "cf_change_type", "label": "Change Type", "choices": ["Standard", "Normal", "Emmergency"]},
+        ],
+    )
+    schema.put("groups", [{"id": 9, "name": "L3 Engineering"}, {"id": 10, "name": "L2 Operations"}])
+
+    class StubLocalLLM:
+        def generate_json(self, prompt, source_text):
+            return {
+                "subject": "Firewall monitoring change",
+                "description": "",
+                "custom_fields": {"cf_change_type": "Standard"},
+                "group_name": "L2 Operations",
+                "assumptions": [],
+            }
+
+    defaults = TicketDefaultsService(schema, lambda: settings)
+    result = DraftAssistantService(StubLocalLLM(), schema, defaults).suggest("change", "Allow restricted SNMP monitoring traffic.")
+    assert result["suggestions"]["group_id"] == 9
+    assert "Reason for change:" in result["suggestions"]["description"]
+    assert result["suggestions"]["custom_fields"] == {
+        "cf_change_type": "Normal",
+        "cf_background_for_the_change": "Allow restricted SNMP monitoring traffic.",
+    }
+    assert result["assumptions"] == ["Change type defaults to Normal unless the notes explicitly identify another change type."]
+
+
+def change_schema(schema: SchemaCache):
+    schema.put(
+        "ticket_fields",
+        [
+            {"name": "cf_background_for_the_change"},
+            {"name": "cf_form2", "choices": ["Change Request"]},
+            {"name": "cf_type", "choices": ["Change"]},
+            {"name": "cf_change_type", "choices": ["Standard", "Normal", "Emmergency"]},
+            {"name": "cf_change_state", "choices": ["Pending approval", "Approved"]},
+            {"name": "cf_approval_state", "choices": ["Not Yet Requested"]},
+            {"name": "cf_change_owner"},
+            {"name": "cf_requested_by"},
+            {"name": "cf_customer967575", "choices": ["A24", "Wise_UK"]},
+            {"name": "cf_chg_business_impact", "choices": ["Minor", "Moderate", "Significant"]},
+            {"name": "cf_change_catergory", "choices": ["Application", "Network"]},
+        ],
+    )
+    schema.put("groups", [{"id": 9, "name": "L3 Engineering"}])
+
+
+def wise_change_document():
+    return {
+        "title": "Change Request - Wise UK - HSM upgrade and mTLS rollout",
+        "planned_change_date": "next Tuesday",
+        "customer": "Wise UK",
+        "environment": "Production HSM environment",
+        "configuration_items": [
+            {"name": "wiseld5-hsm-1", "site_location": "LD5", "purpose": "HSM"},
+            {"name": "wiseld5-hsm-2", "site_location": "LD5", "purpose": "HSM"},
+            {"name": "wiseld8-hsm-1", "site_location": "LD8", "purpose": "HSM"},
+            {"name": "wiseld8-hsm-2", "site_location": "LD8", "purpose": "HSM"},
+        ],
+        "background": "Upgrade firmware to version 2.3a to resolve the mTLS-related bug before rollout.",
+        "change_description": "Upgrade the four HSMs to 2.3a and roll out mTLS using a phased LD5-first approach.",
+        "implementation_steps": [
+            "Verify the software image against the supplied MD5 hashes.",
+            "Upgrade one LD5 HSM and add it to the separate validation load balancer.",
+            "Validate commands using Stargate before upgrading the second LD5 HSM.",
+            "Add known-good upgraded HSMs to the production pool, then upgrade the LD8 HSMs.",
+        ],
+        "rollback_branches": [
+            {"scenario": "HSM validation fails", "steps": ["Remove the affected HSM from the pool and restore known-good routing."]},
+            {"scenario": "mTLS validation fails", "steps": ["Revert certificate changes and keep traffic on known-good HSMs."]},
+        ],
+        "verification": {
+            "pre_change": ["Verify image MD5 hashes and confirm certificates are available."],
+            "in_change": ["Validate commands through Stargate after each HSM upgrade."],
+            "post_change": ["Confirm all four HSMs process production-scenario commands using mTLS."],
+        },
+        "risk_and_impact": "Moderate operational risk managed through phased upgrades and isolated validation.",
+        "expected_outcome": "All four HSMs run 2.3a with mTLS validated.",
+        "success_criteria": ["All four HSMs are upgraded.", "mTLS is validated.", "Production traffic uses the expected pool."],
+        "dependencies": ["Firmware image 2.3a", "MD5 hashes", "Stargate", "Validation load balancer"],
+        "assumptions": [],
+        "freshdesk_fields": {"cf_change_catergory": "Application"},
+    }
+
+
+def test_change_skill_wise_uk_fixture_maps_full_document(core, settings: Settings):
+    _, _, _, _, schema, _ = core
+    change_schema(schema)
+    source = (Path(__file__).parent / "fixtures" / "wise_uk_hsm_notes.txt").read_text()
+
+    class StubLocalLLM:
+        def generate_json(self, prompt, source_text, max_tokens=0):
+            assert "Return one JSON object only" in prompt
+            assert "SOURCE NOTES:" in prompt
+            assert source_text == source
+            return wise_change_document()
+
+    result = ChangeService(
+        StubLocalLLM(),
+        schema,
+        TicketDefaultsService(schema, lambda: settings),
+        now_provider=lambda: datetime(2026, 5, 31, 9, tzinfo=ZoneInfo("Europe/London")),
+    ).suggest(source)
+    document = result["change_document"]
+    custom = result["suggestions"]["custom_fields"]
+    assert document["planned_change_date"] == "Tuesday 2 June 2026"
+    assert len(document["configuration_items"]) == 4
+    assert custom["cf_customer967575"] == "Wise_UK"
+    assert custom["cf_change_type"] == "Normal"
+    assert custom["cf_change_state"] == "Pending approval"
+    assert custom["cf_approval_state"] == "Not Yet Requested"
+    assert result["suggestions"]["group_id"] == 9
+    assert "2.3a" in result["rendered_description"]
+    assert "mTLS" in result["rendered_description"]
+    assert "Tuesday 2 June 2026" in result["assumptions"][0]
+
+
+def test_change_renderer_escapes_unsafe_text_and_omits_assumptions():
+    html = render_change_html(ChangeDocument(title="<script>alert(1)</script>", background="Safe & controlled", assumptions=["Do not render me"]))
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+    assert "Safe &amp; controlled" in html
+    assert "Do not render me" not in html
+
+
+def test_change_service_sparse_and_malformed_sections_fall_back_safely(core, settings: Settings):
+    _, _, _, _, schema, _ = core
+    change_schema(schema)
+
+    class StubLocalLLM:
+        def generate_json(self, prompt, source_text, max_tokens=0):
+            return {"title": None, "background": None, "change_description": None, "implementation_steps": None, "rollback_branches": ["Remove the change."], "verification": ["Confirm service health."]}
+
+    result = ChangeService(StubLocalLLM(), schema, TicketDefaultsService(schema, lambda: settings)).suggest("Update firewall policy for monitoring.")
+    document = result["change_document"]
+    assert document["background"] == "Update firewall policy for monitoring."
+    assert document["change_description"] == "Update firewall policy for monitoring."
+    assert document["rollback_branches"][0]["steps"] == ["Remove the change."]
+    assert document["verification"]["post_change"] == ["Confirm service health."]
+
+
+def test_change_service_returns_editable_fallback_for_invalid_model_json(core, settings: Settings):
+    _, _, _, _, schema, _ = core
+    change_schema(schema)
+
+    class StubLocalLLM:
+        def generate_json(self, prompt, source_text, max_tokens=0):
+            raise HTTPException(status_code=502, detail="Invalid structured output")
+
+    result = ChangeService(StubLocalLLM(), schema, TicketDefaultsService(schema, lambda: settings)).suggest("Update the monitoring firewall rule.")
+    assert result["change_document"]["background"] == "Update the monitoring firewall rule."
+    assert "did not return a complete structured document" in result["assumptions"][0]
+
+
+@pytest.mark.parametrize(
+    ("notes", "expected_type", "expected_state"),
+    [
+        ("This is a Standard change.", "Standard", "Pending approval"),
+        ("Emergency change requiring Approved workflow state.", "Emmergency", "Approved"),
+    ],
+)
+def test_change_service_only_overrides_defaults_when_notes_are_explicit(core, settings: Settings, notes: str, expected_type: str, expected_state: str):
+    _, _, _, _, schema, _ = core
+    change_schema(schema)
+
+    class StubLocalLLM:
+        def generate_json(self, prompt, source_text, max_tokens=0):
+            return {**wise_change_document(), "freshdesk_fields": {"cf_change_catergory": "Not allowed"}}
+
+    result = ChangeService(StubLocalLLM(), schema, TicketDefaultsService(schema, lambda: settings)).suggest(notes)
+    custom = result["suggestions"]["custom_fields"]
+    assert custom["cf_change_type"] == expected_type
+    assert custom["cf_change_state"] == expected_state
+    assert "cf_change_catergory" not in custom
+
+
+def test_change_draft_save_rerenders_description_and_stores_structured_record(core, settings: Settings):
+    _, _, _, _, schema, drafts = core
+    change_schema(schema)
+    document = ChangeDocument.model_validate(wise_change_document())
+    service = ChangeService(None, schema, TicketDefaultsService(schema, lambda: settings))
+    values, generated = service.prepare_draft(
+        {"subject": document.title, "description": "stale preview", "requester_email": "test@example.com", "change_document": document, "assumptions": ["Review date"]}
+    )
+    draft = drafts.create(values, kind="change", generated_output=generated)
+    assert draft["payload"]["description"] == render_change_html(document)
+    assert draft["generated_output"]["change_document"]["title"] == document.title
+    assert draft["generated_output"]["assumptions"] == ["Review date"]
+
+
+def test_approval_workflow_creates_exact_draft(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    sent: list[dict[str, object]] = []
+    services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 99}
+    client = TestClient(app)
+    response = client.post(
+        "/api/tickets/draft",
+        json={"subject": "Reviewed subject", "description": "Reviewed body", "requester_email": "requester@example.com"},
+    )
+    assert response.status_code == 200
+    draft_id = response.json()["draft_id"]
+    response = client.post(f"/api/tickets/drafts/{draft_id}/approve-create", json={"confirmation": "CREATE"})
+    assert response.status_code == 200
+    assert sent == [
+        {
+            "subject": "Reviewed subject",
+            "description": "Reviewed body",
+            "email": "requester@example.com",
+            "priority": 1,
+            "status": 2,
+            "source": 2,
+        }
+    ]
+    response = client.post(f"/api/tickets/drafts/{draft_id}/approve-create", json={"confirmation": "CREATE"})
+    assert response.status_code == 409
+    assert len(sent) == 1
+
+
+def test_schema_sync_is_blocked_by_emergency_stop(settings: Settings):
+    app = create_app(settings)
+    client = TestClient(app)
+    assert client.post("/api/admin/emergency-stop", json={"confirmation": "STOP"}).status_code == 200
+    response = client.post("/api/freshdesk/sync-schema")
+    assert response.status_code == 423
