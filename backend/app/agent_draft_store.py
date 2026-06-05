@@ -35,9 +35,18 @@ FIELD_LABELS = {
     "agent": "Agent",
     "priority": "Priority",
 }
-REQUIRED_SECTIONS = {"scope", "implementation", "rollback", "verification", "config_items"}
+REQUIRED_SECTIONS_BY_PROFILE = {
+    "change": {"scope", "implementation", "rollback", "verification", "config_items"},
+    "standard": set(),
+}
+APPROVAL_CONFIRMATIONS = {
+    "create": "CREATE",
+    "update": "UPDATE",
+    "bulk_create": "CREATE BULK",
+}
 STATUS_CHOICES = {"open": 2, "pending": 3, "resolved": 4, "closed": 5}
 PRIORITY_CHOICES = {"low": 1, "medium": 2, "high": 3, "urgent": 4}
+EMAIL_RE = re.compile(r"[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+")
 
 
 def _normalise(value: Any) -> str:
@@ -141,6 +150,18 @@ class AgentDraftStore:
             row = conn.execute("SELECT * FROM agent_drafts WHERE draft_id = ?", (draft_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="AI agent draft not found.")
+        return self._row_response(row)
+
+    def list(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM agent_drafts ORDER BY updated_at DESC, created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._row_response(row) for row in rows]
+
+    @staticmethod
+    def _row_response(row) -> dict[str, Any]:
         envelope = json.loads(row["envelope"])
         return {
             "draft_id": row["draft_id"],
@@ -224,19 +245,41 @@ class AgentDraftStore:
         self.audit.record("agent_draft_validated", "local", draft_id=draft_id, validation_result=envelope.validation.model_dump())
         return self.get(draft_id)
 
-    def approve_and_submit(self, draft_id: str) -> dict[str, Any]:
+    def approve_and_submit(self, draft_id: str, confirmation: str) -> dict[str, Any]:
         current = self.validate(draft_id)
         if current["approval_status"] == "submitted":
             raise HTTPException(status_code=409, detail="This AI agent draft has already been submitted.")
+        mode = current["envelope"].get("mode", "create")
+        expected_confirmation = APPROVAL_CONFIRMATIONS.get(mode, "CREATE")
+        if confirmation != expected_confirmation:
+            raise HTTPException(status_code=400, detail=f'Type "{expected_confirmation}" to approve this exact AI agent draft.')
         validation = current["validation_result"]
         if not validation.get("valid"):
             raise HTTPException(status_code=422, detail={"message": "AI agent draft validation failed.", **validation})
-        payload = self._ticket_payload(current["envelope"])
-        ticket_validation = self.validator.validate(payload)
-        if not ticket_validation["valid"]:
-            raise HTTPException(status_code=422, detail={"message": "Freshdesk payload validation failed.", **ticket_validation})
-        result = self.freshdesk.create_ticket(payload)
-        ticket_id = str(result.get("id", ""))
+        envelope = current["envelope"]
+        if mode == "bulk_create":
+            payloads = self._bulk_payloads(envelope)
+            self.freshdesk.limiter.ensure_available("write", "ticket_create", amount=len(payloads))
+            results = [self.freshdesk.create_ticket(payload) for payload in payloads]
+            ticket_id = ",".join(str(result.get("id", "")) for result in results)
+            payload: dict[str, Any] = {"bulk_payloads": payloads}
+            api_result = {"ids": [result.get("id") for result in results], "status": "created"}
+        else:
+            payload = self._ticket_payload(envelope)
+            ticket_validation = self.validator.validate(payload, require_requester=mode != "update")
+            if not ticket_validation["valid"]:
+                raise HTTPException(status_code=422, detail={"message": "Freshdesk payload validation failed.", **ticket_validation})
+            if mode == "update":
+                target = envelope.get("target_ticket_id")
+                if target in (None, ""):
+                    raise HTTPException(status_code=422, detail="Update mode requires target_ticket_id.")
+                result = self.freshdesk.update_ticket(target, payload)
+                ticket_id = str(result.get("id") or target)
+                api_result = {"id": ticket_id, "status": "updated"}
+            else:
+                result = self.freshdesk.create_ticket(payload)
+                ticket_id = str(result.get("id", ""))
+                api_result = {"id": ticket_id, "status": "created"}
         feedback = self._feedback_payload(current, ticket_id, payload)
         with self.db.connect() as conn:
             conn.execute(
@@ -254,7 +297,7 @@ class AgentDraftStore:
             ticket_id=ticket_id,
             validation_result=validation,
             approval_result="approved",
-            api_result={"id": ticket_id, "status": "created"},
+            api_result=api_result,
         )
         return self.get(draft_id)
 
@@ -288,18 +331,47 @@ class AgentDraftStore:
         }
 
     def _normalised(self, envelope: AgentDraftEnvelope) -> AgentDraftEnvelope:
-        existing = {field.key: field for field in envelope.ticket_fields}
+        envelope.ticket_fields = self._normalised_fields(envelope.ticket_fields)
+        envelope.rendered_description = self._render_description(envelope.description_sections)
+        if envelope.mode == "bulk_create":
+            envelope.bulk_items = self._normalised_bulk_items(envelope)
+        envelope.validation = self._validate(envelope)
+        envelope.status = "ready_for_review" if envelope.validation.valid else "ready_with_gaps"
+        return envelope
+
+    def _normalised_fields(self, ticket_fields) -> list[Any]:
+        existing = {field.key: field for field in ticket_fields}
         fields = []
         for key in FIELD_LABELS:
             field = existing.get(key)
             if field is None:
                 field = self._default_field(key)
             fields.append(self._resolved_field(field))
-        envelope.ticket_fields = fields
-        envelope.rendered_description = self._render_description(envelope.description_sections)
-        envelope.validation = self._validate(envelope)
-        envelope.status = "ready_for_review" if envelope.validation.valid else "ready_with_gaps"
-        return envelope
+        return fields
+
+    def _normalised_bulk_items(self, envelope: AgentDraftEnvelope):
+        from .models import AgentBulkItem
+
+        items: list[AgentBulkItem] = []
+        template_fields = {field.key: field for field in envelope.ticket_fields}
+        template_sections = {section.key: section for section in envelope.description_sections}
+        for index, item in enumerate(envelope.bulk_items, start=1):
+            item.row_id = item.row_id or f"row_{index:03d}"
+            item.ticket_profile = item.ticket_profile or envelope.ticket_profile
+            fields_by_key = {**template_fields, **{field.key: field for field in item.ticket_fields}}
+            item.ticket_fields = self._normalised_fields(list(fields_by_key.values()))
+            sections_by_key = {**template_sections, **{section.key: section for section in item.description_sections}}
+            item.description_sections = list(sections_by_key.values())
+            item.rendered_description = self._render_description(item.description_sections)
+            item.validation = self._validate_parts(
+                item.ticket_fields,
+                item.description_sections,
+                item.missing_information,
+                item.ticket_profile or envelope.ticket_profile,
+                include_form_warning=False,
+            )
+            items.append(item)
+        return items
 
     def _default_field(self, key: str):
         from .models import AgentTicketField
@@ -338,7 +410,7 @@ class AgentDraftStore:
             return self._resolve_fixed_choice(field, STATUS_CHOICES)
         if field.key == "priority":
             return self._resolve_fixed_choice(field, PRIORITY_CHOICES)
-        if field.key in {"business_impact", "ticket_type"}:
+        if field.key in {"business_impact", "product", "ticket_type"}:
             return self._resolve_schema_choice(field)
 
         if field.required and _missing(value):
@@ -401,7 +473,8 @@ class AgentDraftStore:
     def _resolve_schema_choice(self, field):
         value = field.display_value or _display(field.value)
         schema_field = self._field_for_key(field.key)
-        choices = _choice_values((schema_field or {}).get("choices"))
+        raw_choices = (schema_field or {}).get("choices")
+        choices = _choice_values(raw_choices)
         if not choices:
             field.display_value = value
             return field
@@ -409,6 +482,8 @@ class AgentDraftStore:
         if match:
             field.value = match
             field.display_value = match
+            if isinstance(raw_choices, dict) and match in raw_choices and not isinstance(raw_choices[match], (list, dict)):
+                field.resolved_id = raw_choices[match]
             field.status = "confirmed"
         elif field.required:
             field.status = "needs_human_choice"
@@ -456,48 +531,87 @@ class AgentDraftStore:
         return "\n\n".join(blocks)
 
     @staticmethod
-    def _validate(envelope: AgentDraftEnvelope):
+    def _validate_parts(ticket_fields, description_sections, missing_information, ticket_profile: str, *, include_form_warning: bool = True):
         from .models import AgentValidation
 
         blocking: list[str] = []
         warnings: list[str] = []
-        for field in envelope.ticket_fields:
+        for field in ticket_fields:
             value = field.display_value or field.value
             if field.required and _missing(value):
                 blocking.append(f"{field.label} is required.")
             if field.key != "form" and field.required and field.status in {"missing", "conflict", "needs_human_choice"}:
                 blocking.append(field.missing_reason or f"{field.label} needs review.")
-            if field.key == "form":
+            if include_form_warning and field.key == "form":
                 warnings.append("Confirm A24 Freshdesk form binding before using form selection for real API submission.")
-        sections = {section.key: section for section in envelope.description_sections}
-        for key in REQUIRED_SECTIONS:
+        sections = {section.key: section for section in description_sections}
+        for key in REQUIRED_SECTIONS_BY_PROFILE.get(ticket_profile, set()):
             section = sections.get(key)
             label = (section.title if section else key.replace("_", " ").title())
             if not section or _missing(section.content):
                 blocking.append(f"{label} is required for change-style tickets.")
-        for item in envelope.missing_information:
+        if ticket_profile == "standard" and not any(not _missing(section.content) for section in description_sections):
+            blocking.append("Description is required.")
+        for item in missing_information:
             warnings.append(f"{item.field}: {item.reason}")
         blocking = list(dict.fromkeys(blocking))
-        warnings = list(dict.fromkeys([*envelope.validation.warnings, *warnings]))
+        warnings = list(dict.fromkeys(warnings))
         return AgentValidation(warnings=warnings, blocking=blocking, valid=not blocking)
 
-    def _ticket_payload(self, envelope: dict[str, Any]) -> dict[str, Any]:
-        fields = {field["key"]: field for field in envelope.get("ticket_fields", [])}
+    def _validate(self, envelope: AgentDraftEnvelope):
+        from .models import AgentValidation
+
+        if envelope.mode == "update" and envelope.target_ticket_id in (None, ""):
+            return AgentValidation(warnings=[], blocking=["Update mode requires target_ticket_id."], valid=False)
+        if envelope.mode == "bulk_create":
+            blocking: list[str] = []
+            warnings: list[str] = []
+            if not envelope.bulk_items:
+                blocking.append("Bulk create mode requires at least one bulk item.")
+            for item in envelope.bulk_items:
+                validation = item.validation
+                prefix = item.title or item.row_id
+                blocking.extend(f"{prefix}: {message}" for message in validation.blocking)
+                warnings.extend(f"{prefix}: {message}" for message in validation.warnings)
+            return AgentValidation(warnings=list(dict.fromkeys(warnings)), blocking=list(dict.fromkeys(blocking)), valid=not blocking)
+        result = self._validate_parts(
+            envelope.ticket_fields,
+            envelope.description_sections,
+            envelope.missing_information,
+            envelope.ticket_profile,
+        )
+        result.warnings = list(dict.fromkeys([*envelope.validation.warnings, *result.warnings]))
+        return result
+
+    def _ticket_payload(self, envelope: dict[str, Any], bulk_item: dict[str, Any] | None = None) -> dict[str, Any]:
+        source = bulk_item or envelope
+        fields = {field["key"]: field for field in source.get("ticket_fields", [])}
 
         def value(key: str) -> Any:
             field = fields.get(key) or {}
             return field.get("display_value") or field.get("value")
 
-        defaults = self.defaults.defaults("change")
+        mode = envelope.get("mode", "create")
+        defaults = self.defaults.defaults(source.get("ticket_profile") or envelope.get("ticket_profile", "change"))
+        contact = fields.get("contact", {})
+        contact_value = _display(value("contact") or defaults.get("requester_name")).strip()
+        contact_email = self._email_from(contact_value) or defaults.get("requester_email", "")
         payload: dict[str, Any] = {
             "subject": _display(value("subject")).strip(),
-            "description": envelope.get("rendered_description", "").strip(),
-            "email": defaults.get("requester_email", ""),
-            "name": _display(value("contact") or defaults.get("requester_name")).strip(),
+            "description": source.get("rendered_description", "").strip(),
             "priority": fields.get("priority", {}).get("value") or 1,
             "status": fields.get("status", {}).get("value") or 2,
             "source": 2,
         }
+        include_requester = mode != "update" or contact.get("source") in {"ai_agent", "user_edit"} or contact.get("resolved_id") not in (None, "")
+        if include_requester:
+            payload["email"] = contact_email
+            payload["name"] = contact_value
+        contact_id = contact.get("resolved_id")
+        if contact_id not in (None, ""):
+            payload.pop("email", None)
+            payload.pop("name", None)
+            payload["requester_id"] = int(contact_id)
         group_id = fields.get("group", {}).get("resolved_id")
         if group_id not in (None, ""):
             payload["group_id"] = int(group_id)
@@ -509,14 +623,47 @@ class AgentDraftStore:
             payload["type"] = _display(ticket_type)
 
         custom_fields = dict(defaults.get("custom_fields", {}))
-        for key in ("business_impact", "product"):
-            field = self._field_for_key(key)
-            field_value = value(key)
-            if field and field.get("name") and str(field.get("name")).startswith("cf_") and field_value not in (None, ""):
-                custom_fields[str(field["name"])] = field_value
+        for key in ("business_impact", "product", "form", "ticket_type"):
+            self._apply_schema_field_to_payload(payload, custom_fields, key, fields.get(key, {}), value(key))
         if custom_fields:
             payload["custom_fields"] = custom_fields
         return payload
+
+    def _bulk_payloads(self, envelope: dict[str, Any]) -> list[dict[str, Any]]:
+        payloads = [self._ticket_payload(envelope, item) for item in envelope.get("bulk_items", [])]
+        failures = []
+        for index, payload in enumerate(payloads, start=1):
+            validation = self.validator.validate(payload)
+            if not validation["valid"]:
+                failures.append({"row": index, **validation})
+        if failures:
+            raise HTTPException(status_code=422, detail={"message": "Freshdesk payload validation failed for one or more bulk rows.", "rows": failures})
+        return payloads
+
+    @staticmethod
+    def _email_from(value: str) -> str | None:
+        match = EMAIL_RE.search(value)
+        return match.group(0) if match else None
+
+    def _apply_schema_field_to_payload(
+        self,
+        payload: dict[str, Any],
+        custom_fields: dict[str, Any],
+        key: str,
+        field_value_record: dict[str, Any],
+        field_value: Any,
+    ) -> None:
+        if field_value in (None, ""):
+            return
+        field = self._field_for_key(key)
+        if not field:
+            return
+        name = str(field.get("name") or "")
+        if name.startswith("cf_"):
+            custom_fields[name] = field_value
+        elif name in {"product", "product_id"}:
+            resolved = field_value_record.get("resolved_id")
+            payload["product_id" if name == "product_id" else name] = int(resolved) if resolved not in (None, "") else field_value
 
     def _feedback_payload(self, current: dict[str, Any], ticket_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         envelope = current["envelope"]

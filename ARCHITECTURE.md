@@ -8,7 +8,7 @@ Browser UI
     -> emergency-stop guard
     -> deterministic sensitive-data validation
     -> rolling-hour rate limiter
-    -> explicit draft approval workflow
+    -> explicit typed draft approval workflow
       -> Freshdesk API client using backend-only Basic Auth
 
 Browser UI
@@ -18,6 +18,7 @@ Browser UI
 
 Tailnet device
   -> private Tailscale Serve HTTPS route
+    -> optional Agent API bearer/service-token check
     -> loopback-only FastAPI REST API
 ```
 
@@ -39,7 +40,8 @@ The browser never receives the Freshdesk API key. Every future interface, includ
 | `schema_context.py` | Compact synced-schema projection for local change drafting |
 | `validators.py` | Required-field and sensitive-data validation |
 | `ticket_templates.py` | Legacy manual change fallback rendering |
-| `draft_store.py` | Drafts, expiry, batch parsing, editing, and created state |
+| `draft_store.py` | Manual drafts, expiry, batch parsing, editing, and created state |
+| `agent_draft_store.py` | Agent draft envelopes, update/create/bulk submit modes, row validation, revisions, and feedback payloads |
 | `local_llm_client.py` | Optional local-only Ollama or OpenAI-compatible model calls |
 | `ticket_defaults.py` | Editable identity and schema-aware defaults |
 | `draft_assistant.py` | Schema-constrained local-model ticket suggestions |
@@ -92,6 +94,10 @@ Versioned local drafting instructions live in `skills/<skill-id>/`. Each folder 
 ## Tailnet Access
 
 FastAPI remains bound to `127.0.0.1`. `scripts/tailnet-serve.sh` publishes that loopback service through Tailscale Serve for private Tailnet access. The gateway must not use Tailscale Funnel or bind broadly to LAN interfaces by default.
+
+When another machine, such as an OpenClaw orchestrator on a Mac Mini, calls the AI Agent API on the MacBook-hosted gateway, set `AGENT_API_TOKEN` and send it as either `Authorization: Bearer <token>` or `X-Agent-Token`.
+
+The AI Agent review page is a draft inbox. It never manufactures example drafts for itself; it loads the latest submitted envelope from `GET /api/v1/drafts` and waits empty until OpenClaw posts a real draft. The gateway remains responsible for translating the reviewed semantic ledger into Freshdesk API fields at the approval boundary.
 
 ## Extension Rule
 

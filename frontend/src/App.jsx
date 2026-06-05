@@ -28,8 +28,13 @@ import {
 const API = "/api";
 
 async function request(path, options = {}) {
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  const agentToken = window.localStorage.getItem("agent_api_token");
+  if (path.startsWith("/v1/") && agentToken && !headers.Authorization) {
+    headers.Authorization = `Bearer ${agentToken}`;
+  }
   const response = await fetch(`${API}${path}`, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    headers,
     ...options,
   });
   if (!response.ok) {
@@ -283,6 +288,7 @@ function App() {
               setDraft={setAgentDraft}
               metadata={agentMetadata}
               setMetadata={setAgentMetadata}
+              setModal={setModal}
               notify={notify}
             />
           )}
@@ -402,6 +408,16 @@ function App() {
           }}
         />
       )}
+      {modal?.kind === "agent-submit" && (
+        <Modal
+          title={modal.title}
+          copy={modal.copy}
+          confirmWord={modal.confirmWord}
+          actionLabel={modal.actionLabel}
+          onClose={() => setModal(null)}
+          onConfirm={modal.onConfirm}
+        />
+      )}
     </div>
   );
 }
@@ -501,248 +517,6 @@ function ActionCard({ icon: Icon, title, text, onClick }) {
   );
 }
 
-function aiAgentExampleEnvelope() {
-  return {
-    schema_version: "a24.freshdesk_draft.v1",
-    mode: "create",
-    status: "ready_with_gaps",
-    ticket_fields: [
-      {
-        key: "product",
-        label: "Product",
-        kind: "entity_ref",
-        value: "A24 Support",
-        display_value: "A24 Support",
-        required: true,
-        status: "confirmed",
-        confidence: 1,
-        why_this_value: "Configured A24 gateway default.",
-        source_ids: ["src_default_1"],
-        source: "default",
-      },
-      {
-        key: "contact",
-        label: "Contact",
-        kind: "entity_ref",
-        value: "Kwabiwe Sibanda",
-        display_value: "Kwabiwe Sibanda",
-        required: true,
-        status: "confirmed",
-        confidence: 1,
-        why_this_value: "Configured A24 gateway default.",
-        source_ids: ["src_default_1"],
-        source: "default",
-      },
-      {
-        key: "subject",
-        label: "Subject",
-        kind: "short_text",
-        value: "Mailbox routing change for finance shared mailbox",
-        display_value: "Mailbox routing change for finance shared mailbox",
-        required: true,
-        status: "inferred",
-        confidence: 0.91,
-        why_this_value: "Summarises the requested mailbox routing change from the sample email context.",
-        source_ids: ["src_email_1"],
-        source: "ai_agent",
-      },
-      {
-        key: "form",
-        label: "Form",
-        kind: "enum",
-        value: "Change Request",
-        display_value: "Change Request",
-        required: true,
-        status: "inferred",
-        confidence: 0.74,
-        why_this_value: "The AI agent classified the request as a change-style regular Freshdesk ticket.",
-        source_ids: ["src_email_1", "src_note_1"],
-        source: "ai_agent",
-      },
-      {
-        key: "ticket_type",
-        label: "Ticket Type",
-        kind: "enum",
-        value: "Change",
-        display_value: "Change",
-        required: true,
-        status: "inferred",
-        confidence: 0.82,
-        why_this_value: "The notes describe a planned configuration change.",
-        source_ids: ["src_note_1"],
-        source: "ai_agent",
-      },
-      {
-        key: "status",
-        label: "Status",
-        kind: "enum",
-        value: "Open",
-        display_value: "Open",
-        required: true,
-        status: "confirmed",
-        confidence: 0.88,
-        why_this_value: "New drafts default to Open until the ticket exists in Freshdesk.",
-        source_ids: ["src_default_1"],
-        source: "default",
-      },
-      {
-        key: "business_impact",
-        label: "Business Impact",
-        kind: "enum",
-        value: "Minor",
-        display_value: "Minor",
-        required: true,
-        status: "confirmed",
-        confidence: 0.86,
-        why_this_value: "A24 default unless the source material shows broader user impact.",
-        source_ids: ["src_default_1", "src_email_1"],
-        source: "default",
-      },
-      {
-        key: "group",
-        label: "Group",
-        kind: "entity_ref",
-        value: "L3 Engineer",
-        display_value: "L3 Engineer",
-        required: true,
-        status: "confirmed",
-        confidence: 1,
-        why_this_value: "Configured A24 gateway default group.",
-        source_ids: ["src_default_1"],
-        source: "default",
-      },
-      {
-        key: "agent",
-        label: "Agent",
-        kind: "entity_ref",
-        value: "Kwabiwe Sibanda",
-        display_value: "Kwabiwe Sibanda",
-        required: true,
-        status: "confirmed",
-        confidence: 1,
-        why_this_value: "Configured A24 gateway default agent.",
-        source_ids: ["src_default_1"],
-        source: "default",
-      },
-      {
-        key: "priority",
-        label: "Priority",
-        kind: "enum",
-        value: "Low",
-        display_value: "Low",
-        required: true,
-        status: "inferred",
-        confidence: 0.79,
-        why_this_value: "The sample context does not describe urgency or active user impact.",
-        source_ids: ["src_email_1"],
-        source: "ai_agent",
-      },
-    ],
-    description_sections: [
-      {
-        key: "scope",
-        title: "Scope of the change",
-        content: "Update mailbox routing for the named shared mailbox so messages reach the correct support workflow. No user mailbox migration is included.",
-        status: "inferred",
-        confidence: 0.88,
-        source_ids: ["src_email_1", "src_note_1"],
-      },
-      {
-        key: "implementation",
-        title: "Implementation steps",
-        content: "1. Confirm the target shared mailbox and existing routing.\n2. Update the mailbox routing rule.\n3. Send a controlled test message.\n4. Confirm the message reaches the expected queue.",
-        status: "inferred",
-        confidence: 0.81,
-        source_ids: ["src_note_1"],
-      },
-      {
-        key: "rollback",
-        title: "Rollback plan",
-        content: "",
-        status: "missing",
-        confidence: 0.32,
-        source_ids: ["src_email_1"],
-      },
-      {
-        key: "verification",
-        title: "Test or verification steps",
-        content: "Send a test message after the routing update and confirm it lands in the expected Freshdesk workflow.",
-        status: "inferred",
-        confidence: 0.76,
-        source_ids: ["src_note_1"],
-      },
-      {
-        key: "config_items",
-        title: "Configuration Items",
-        content: "",
-        status: "missing",
-        confidence: 0.27,
-        source_ids: ["src_email_1"],
-      },
-      {
-        key: "requester_context",
-        title: "Relevant requester/customer context",
-        content: "Sample email context says the request came from an internal A24 support workflow.",
-        status: "inferred",
-        confidence: 0.7,
-        source_ids: ["src_email_1"],
-      },
-      {
-        key: "assumptions_missing",
-        title: "Assumptions or missing information",
-        content: "Rollback steps and exact configuration item names need review before approval.",
-        status: "inferred",
-        confidence: 0.93,
-        source_ids: ["src_email_1", "src_note_1"],
-      },
-    ],
-    sources: [
-      {
-        id: "src_email_1",
-        kind: "email",
-        title: "Sample email context",
-        ref: "sample://email/mailbox-routing",
-        snippet: "Requester asks for a shared mailbox routing change and asks that a Freshdesk ticket is prepared before the work is carried out.",
-      },
-      {
-        id: "src_trello_1",
-        kind: "trello",
-        title: "Sample Trello context",
-        ref: "sample://trello/a24-support",
-        snippet: "A24 support board contains a related card for mailbox workflow clean-up.",
-      },
-      {
-        id: "src_note_1",
-        kind: "note",
-        title: "Sample rough notes",
-        ref: "sample://notes/agent-request",
-        snippet: "Draft a change-style Freshdesk ticket from a short AI agent instruction and connected context.",
-      },
-      {
-        id: "src_default_1",
-        kind: "gateway_default",
-        title: "Gateway defaults",
-        ref: "local://a24/defaults",
-        snippet: "Product A24 Support, contact Kwabiwe Sibanda, agent Kwabiwe Sibanda, group L3 Engineer, business impact Minor.",
-      },
-    ],
-    assumptions: [
-      { id: "asm_1", text: "Business impact is Minor unless source context shows wider service impact." },
-      { id: "asm_2", text: "The ticket is a regular Freshdesk ticket, not a Freshservice change record." },
-    ],
-    missing_information: [
-      { field: "rollback", reason: "No rollback steps were present in the sample source material." },
-      { field: "config_items", reason: "The exact mailbox or configuration object name needs confirmation." },
-    ],
-    validation: {
-      warnings: ["Form selection needs tenant verification before real Freshdesk submission."],
-      blocking: [],
-      valid: true,
-    },
-    revision: { number: 1, created_by: "ai_agent", events: [] },
-  };
-}
-
 function optionRecords(metadata, key, currentValue) {
   const includeCurrent = (items) => {
     const value = currentValue || "";
@@ -780,7 +554,7 @@ function guidanceForSection(key) {
   }[key] || "Review this section before approval.";
 }
 
-function AgentReview({ draft, setDraft, metadata, setMetadata, notify }) {
+function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify }) {
   const [tab, setTab] = useState("review");
   const [working, setWorking] = useState(false);
   const validation = draft?.validation_result || draft?.envelope?.validation || { valid: false, blocking: [] };
@@ -790,49 +564,40 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, notify }) {
   const fieldCount = envelope?.ticket_fields?.length || 0;
   const readyCount = envelope?.ticket_fields?.filter((field) => !["missing", "needs_human_choice", "conflict"].includes(field.status)).length || 0;
 
-  const createSample = useCallback(async () => {
+  const loadReviewWorkspace = useCallback(async ({ preferSaved = true } = {}) => {
     setWorking(true);
     try {
-      const result = await request("/v1/drafts", {
-        method: "POST",
-        body: JSON.stringify(aiAgentExampleEnvelope()),
-      });
-      window.localStorage.setItem("ai_agent_review_draft_id", result.draft_id);
-      setDraft(result);
-      notify("success", "Example AI Agent draft loaded.");
+      const meta = await request("/v1/metadata");
+      setMetadata(meta);
+      const savedId = preferSaved ? window.localStorage.getItem("ai_agent_review_draft_id") : "";
+      if (savedId) {
+        try {
+          const saved = await request(`/v1/drafts/${savedId}`);
+          setDraft(saved);
+          return;
+        } catch {
+          window.localStorage.removeItem("ai_agent_review_draft_id");
+        }
+      }
+      const items = await request("/v1/drafts?limit=1");
+      const latest = Array.isArray(items) ? items[0] : null;
+      if (latest) {
+        window.localStorage.setItem("ai_agent_review_draft_id", latest.draft_id);
+        setDraft(latest);
+      } else {
+        window.localStorage.removeItem("ai_agent_review_draft_id");
+        setDraft(null);
+      }
     } catch (error) {
       notify("error", error.message);
     } finally {
       setWorking(false);
     }
-  }, [notify, setDraft]);
+  }, [notify, setDraft, setMetadata]);
 
   useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const meta = await request("/v1/metadata");
-        if (!cancelled) setMetadata(meta);
-        const savedId = window.localStorage.getItem("ai_agent_review_draft_id");
-        if (savedId) {
-          try {
-            const saved = await request(`/v1/drafts/${savedId}`);
-            if (!cancelled) setDraft(saved);
-            return;
-          } catch {
-            window.localStorage.removeItem("ai_agent_review_draft_id");
-          }
-        }
-        if (!cancelled) await createSample();
-      } catch (error) {
-        if (!cancelled) notify("error", error.message);
-      }
-    }
-    if (!draft) load();
-    return () => {
-      cancelled = true;
-    };
-  }, [createSample, draft, notify, setDraft, setMetadata]);
+    if (!draft && !metadata) loadReviewWorkspace();
+  }, [draft, loadReviewWorkspace, metadata]);
 
   const localUpdateField = (key, value) => {
     setDraft((current) => {
@@ -876,17 +641,39 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, notify }) {
     }
   };
 
-  const approve = async () => {
+  const approvalPhrase = (mode) => ({ update: "UPDATE", bulk_create: "CREATE BULK" }[mode] || "CREATE");
+
+  const submitApprovedDraft = async (word) => {
     setWorking(true);
     try {
-      const result = await request(`/v1/drafts/${draft.draft_id}/approve-and-submit`, { method: "POST" });
+      const result = await request(`/v1/drafts/${draft.draft_id}/approve-and-submit`, {
+        method: "POST",
+        body: JSON.stringify({ confirmation: word }),
+      });
       setDraft(result);
-      notify("success", "Freshdesk ticket created. Feedback event is ready for the AI agent.");
+      setModal(null);
+      const verb = envelope.mode === "update" ? "updated" : envelope.mode === "bulk_create" ? "tickets created" : "ticket created";
+      notify("success", `Freshdesk ${verb}. Feedback event is ready for the AI agent.`);
     } catch (error) {
       notify("error", error.message);
     } finally {
       setWorking(false);
     }
+  };
+
+  const approve = async () => {
+    const mode = envelope.mode || "create";
+    const confirmWord = approvalPhrase(mode);
+    setModal({
+      kind: "agent-submit",
+      title: mode === "update" ? "Update this Freshdesk ticket?" : mode === "bulk_create" ? "Create these Freshdesk tickets?" : "Create this Freshdesk ticket?",
+      copy: mode === "bulk_create"
+        ? `Review complete. This submits ${envelope.bulk_items?.length || 0} generated tickets to Freshdesk.`
+        : `Review complete. This sends the exact approved AI Agent draft to Freshdesk: ${fieldValue(envelope.ticket_fields.find((field) => field.key === "subject")) || "Untitled ticket"}`,
+      confirmWord,
+      actionLabel: mode === "update" ? "Update ticket" : mode === "bulk_create" ? "Create tickets" : "Create ticket",
+      onConfirm: submitApprovedDraft,
+    });
   };
 
   const saveReview = async () => {
@@ -910,7 +697,7 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, notify }) {
     }
   };
 
-  if (!draft || !metadata || !envelope) {
+  if (!metadata) {
     return (
       <section className="section">
         <div className="section-head">
@@ -919,8 +706,37 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, notify }) {
             <h2>Loading review workspace</h2>
           </div>
         </div>
-        <Empty title="Preparing an example draft" text="The gateway is loading metadata and creating a provider-neutral AI Agent handoff." />
+        <Empty title="Loading gateway metadata" text="The review page is connecting to the local Freshdesk gateway." />
       </section>
+    );
+  }
+
+  if (!draft || !envelope) {
+    return (
+      <div className="agent-page">
+        <section className="agent-hero">
+          <div>
+            <span className="eyebrow">A24 AI Agent to Freshdesk</span>
+            <h2>No AI Agent drafts are waiting for review</h2>
+            <p>OpenClaw needs to submit a structured draft to the gateway before this page has anything to review. The gateway no longer creates fake example data.</p>
+          </div>
+          <div className="agent-hero-actions">
+            <Badge>Waiting for draft</Badge>
+            <Button type="button" icon={RefreshCw} variant="quiet" onClick={() => loadReviewWorkspace({ preferSaved: false })} disabled={working}>Refresh drafts</Button>
+          </div>
+        </section>
+        <section className="section">
+          <div className="section-head">
+            <div>
+              <span className="eyebrow">Next handoff</span>
+              <h2>How OpenClaw connects</h2>
+            </div>
+            <Badge>{metadata?.schema_version}</Badge>
+          </div>
+          <p className="section-copy">OpenClaw posts a versioned draft envelope to <code>POST /api/v1/drafts</code>. After that, refresh this page and review the exact fields that will be mapped into the Freshdesk API payload on approval.</p>
+        </section>
+        <AgentApiPanel metadata={metadata} />
+      </div>
     );
   }
 
@@ -934,7 +750,7 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, notify }) {
         </div>
         <div className="agent-hero-actions">
           <Badge tone={validation.valid ? "good" : "alert"}>{validation.valid ? "Ready for approval" : "Needs review"}</Badge>
-          <Button type="button" icon={RefreshCw} variant="quiet" onClick={createSample} disabled={working}>Load example</Button>
+          <Button type="button" icon={RefreshCw} variant="quiet" onClick={() => loadReviewWorkspace({ preferSaved: false })} disabled={working}>Refresh drafts</Button>
         </div>
       </section>
 
@@ -1059,7 +875,13 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, notify }) {
                 <ReviewList items={validation.warnings || []} empty="No warnings." />
               </div>
               <Button variant="dark" icon={Check} disabled={!validation.valid || working || draft.approval_status === "submitted"} onClick={approve}>
-                {draft.approval_status === "submitted" ? "Submitted" : "Create Freshdesk ticket"}
+                {draft.approval_status === "submitted"
+                  ? "Submitted"
+                  : envelope.mode === "update"
+                    ? "Update Freshdesk ticket"
+                    : envelope.mode === "bulk_create"
+                      ? "Create Freshdesk tickets"
+                      : "Create Freshdesk ticket"}
               </Button>
             </section>
 
@@ -1094,62 +916,71 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, notify }) {
         </div>
       )}
 
-      {tab === "bulk" && <AgentBulkPreview />}
+      {tab === "bulk" && <AgentBulkPreview envelope={envelope} />}
       {tab === "api" && <AgentApiPanel metadata={metadata} />}
     </div>
   );
 }
 
-function AgentBulkPreview() {
-  const rows = [
-    ["User 1", "Laptop request", "Draft ready"],
-    ["User 2", "Freshdesk access", "Needs manager context"],
-    ["User 3", "Mailbox permissions", "Draft ready"],
-    ["User 4", "VPN access", "Needs start date"],
-    ["User 5", "Shared drive access", "Draft ready"],
-  ];
+function AgentBulkPreview({ envelope }) {
+  const rows = envelope?.bulk_items || [];
+  const isBulk = envelope?.mode === "bulk_create";
   return (
     <section className="section agent-bulk">
       <div className="section-head">
         <div>
-          <span className="eyebrow">Future bulk_create mode</span>
+          <span className="eyebrow">bulk_create mode</span>
           <h2>One template, many reviewable tickets</h2>
         </div>
-        <Badge>Lightweight preview</Badge>
+        <Badge>{isBulk ? `${rows.length} rows` : "Not a bulk draft"}</Badge>
       </div>
-      <p className="section-copy">An AI agent can prepare onboarding-style batches as one template plus multiple rows. Each generated row still becomes an approval-ready draft before Freshdesk creation.</p>
+      <p className="section-copy">When OpenClaw submits a bulk-create envelope, each row is validated and shown here before the gateway creates anything in Freshdesk.</p>
       <div className="bulk-template-grid">
         <article>
           <span>Template</span>
-          <strong>New user onboarding task</strong>
-          <p>Shared defaults: A24 Support, Kwabiwe Sibanda, L3 Engineer, Minor business impact.</p>
+          <strong>{fieldValue(envelope?.ticket_fields?.find((field) => field.key === "subject")) || "No template subject"}</strong>
+          <p>Shared defaults and review edits are merged with each submitted row at approval time.</p>
         </article>
         <article>
           <span>Rows</span>
-          <strong>5 tickets</strong>
+          <strong>{rows.length} tickets</strong>
           <p>Each row inherits the template and records its own missing information.</p>
         </article>
       </div>
-      <div className="table-wrap">
-        <table>
-          <thead><tr><th>Row</th><th>Ticket focus</th><th>Gateway state</th></tr></thead>
-          <tbody>
-            {rows.map(([user, focus, state]) => <tr key={user}><td>{user}</td><td>{focus}</td><td>{state}</td></tr>)}
-          </tbody>
-        </table>
-      </div>
+      {rows.length ? (
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Row</th><th>Ticket focus</th><th>Gateway state</th></tr></thead>
+            <tbody>
+              {rows.map((row) => {
+                const subject = fieldValue(row.ticket_fields?.find((field) => field.key === "subject")) || row.title || row.row_id;
+                const valid = row.validation?.valid;
+                return (
+                  <tr key={row.row_id}>
+                    <td>{row.row_id}</td>
+                    <td>{subject}</td>
+                    <td>{valid ? "Ready" : "Needs review"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : <Empty title="No bulk rows on this draft" text="Submit a bulk_create envelope from OpenClaw to review row-level tickets here." />}
     </section>
   );
 }
 
 function AgentApiPanel({ metadata }) {
+  const [token, setToken] = useState(() => window.localStorage.getItem("agent_api_token") || "");
   const endpoints = [
     "GET /api/v1/metadata",
+    "GET /api/v1/drafts?limit=20",
     "POST /api/v1/drafts",
     "GET /api/v1/drafts/{id}",
     "PATCH /api/v1/drafts/{id}",
     "POST /api/v1/drafts/{id}/validate",
-    "POST /api/v1/drafts/{id}/approve-and-submit",
+    "POST /api/v1/drafts/{id}/approve-and-submit {confirmation}",
     "POST /api/v1/feedback/approved-drafts",
   ];
   return (
@@ -1164,6 +995,25 @@ function AgentApiPanel({ metadata }) {
       <p className="section-copy">The gateway accepts structured drafts, validates against cached Freshdesk metadata, and returns an explicit feedback event after approval.</p>
       <div className="api-route-grid">
         {endpoints.map((endpoint) => <code key={endpoint}>{endpoint}</code>)}
+      </div>
+      <div className="settings-grid">
+        <Field label="Agent API token">
+          <input type="password" value={token} onChange={(event) => setToken(event.target.value)} />
+        </Field>
+        <div className="field">
+          <span className="field-label">Browser token store</span>
+          <Button
+            type="button"
+            variant="quiet"
+            icon={ShieldCheck}
+            onClick={() => {
+              if (token) window.localStorage.setItem("agent_api_token", token);
+              else window.localStorage.removeItem("agent_api_token");
+            }}
+          >
+            Save token
+          </Button>
+        </div>
       </div>
       <div className="validation-box">
         <strong>Freshdesk form binding</strong>

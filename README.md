@@ -44,6 +44,10 @@ The Vite frontend runs at [http://127.0.0.1:5173](http://127.0.0.1:5173) and pro
 
 - Every ticket is drafted and validated before creation.
 - Ticket creation needs an explicit typed approval.
+- AI Agent drafts also need mode-specific typed approval: `CREATE`, `UPDATE`, or `CREATE BULK`.
+- The AI Agent review page shows real submitted drafts only; it no longer creates local example data.
+- The AI Agent API can require a local service token with `AGENT_API_TOKEN`.
+- `scripts/openclaw-gateway.py` gives OpenClaw a small CLI for metadata, draft submit/list/get, and feedback retrieval.
 - Batch creation preflights the selected count against local limits.
 - Obvious secrets block ticket creation and are rejected before local-model calls.
 - Freshdesk writes default to 5 per hour.

@@ -878,6 +878,19 @@ def test_agent_draft_accepts_normalizes_and_resolves_metadata(settings: Settings
     assert "form binding" in body["validation_result"]["warnings"][0].lower()
 
 
+def test_agent_lists_submitted_drafts_for_review_inbox(settings: Settings):
+    client = TestClient(create_app(settings))
+    first = client.post("/api/v1/drafts", json={**agent_payload(), "draft_id": "agd_first"}).json()
+    second = client.post("/api/v1/drafts", json={**agent_payload(), "draft_id": "agd_second"}).json()
+
+    response = client.get("/api/v1/drafts?limit=10")
+
+    assert response.status_code == 200
+    listed_ids = {draft["draft_id"] for draft in response.json()}
+    assert {first["draft_id"], second["draft_id"]} <= listed_ids
+    assert len(client.get("/api/v1/drafts?limit=1").json()) == 1
+
+
 def test_agent_rejects_unsupported_schema_version(settings: Settings):
     payload = {**agent_payload(), "schema_version": "a24.freshdesk_draft.v9"}
     response = TestClient(create_app(settings)).post("/api/v1/drafts", json=payload)
@@ -904,7 +917,7 @@ def test_agent_patch_tracks_revision_and_feedback_payload(settings: Settings):
     assert updated["revision_events"][0]["old_value"] == "Mailbox routing change"
     assert updated["revision_events"][0]["new_value"] == "Mailbox routing change - reviewed"
 
-    response = client.post(f"/api/v1/drafts/{draft_id}/approve-and-submit")
+    response = client.post(f"/api/v1/drafts/{draft_id}/approve-and-submit", json={"confirmation": "CREATE"})
     assert response.status_code == 200
     submitted = response.json()
     assert submitted["approval_status"] == "submitted"
@@ -916,6 +929,101 @@ def test_agent_patch_tracks_revision_and_feedback_payload(settings: Settings):
     assert submitted["feedback_payload"]["changed_fields"][0]["field_key"] == "subject"
     assert submitted["feedback_payload"]["final_fields"]["subject"] == "Mailbox routing change - reviewed"
     assert submitted["feedback_payload"]["freshdesk_payload"]["subject"] == "Mailbox routing change - reviewed"
+
+
+def test_agent_submit_requires_exact_confirmation(settings: Settings):
+    app = create_app(settings)
+    client = TestClient(app)
+    created = client.post("/api/v1/drafts", json=agent_payload()).json()
+    response = client.post(
+        f"/api/v1/drafts/{created['draft_id']}/approve-and-submit",
+        json={"confirmation": "APPROVE"},
+    )
+    assert response.status_code == 400
+    assert 'Type "CREATE"' in response.json()["detail"]
+
+
+def test_agent_update_mode_updates_existing_ticket(settings: Settings):
+    app = create_app(settings)
+    sent: list[tuple[str, dict[str, object]]] = []
+    app.state.services.freshdesk.update_ticket = lambda ticket_id, payload: sent.append((str(ticket_id), payload)) or {"id": ticket_id}
+    client = TestClient(app)
+    payload = {**agent_payload(), "mode": "update", "target_ticket_id": 7654}
+    created = client.post("/api/v1/drafts", json=payload).json()
+    response = client.post(
+        f"/api/v1/drafts/{created['draft_id']}/approve-and-submit",
+        json={"confirmation": "UPDATE"},
+    )
+    assert response.status_code == 200
+    assert response.json()["ticket_id"] == "7654"
+    assert sent[0][0] == "7654"
+    assert sent[0][1]["subject"] == "Mailbox routing change"
+    assert "email" not in sent[0][1]
+    assert "name" not in sent[0][1]
+
+
+def test_agent_standard_profile_does_not_require_change_sections(settings: Settings):
+    payload = {
+        **agent_payload(),
+        "ticket_profile": "standard",
+        "description_sections": [
+            {"key": "description", "title": "Description", "content": "Create a normal support ticket.", "status": "confirmed"}
+        ],
+    }
+    response = TestClient(create_app(settings)).post("/api/v1/drafts", json=payload)
+    assert response.status_code == 200
+    assert response.json()["validation_result"]["valid"] is True
+
+
+def test_agent_bulk_create_validates_all_rows_before_creating(settings: Settings):
+    app = create_app(settings)
+    sent: list[dict[str, object]] = []
+    app.state.services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 2000 + len(sent)}
+    client = TestClient(app)
+    payload = {
+        **agent_payload(),
+        "mode": "bulk_create",
+        "ticket_profile": "standard",
+        "description_sections": [],
+        "bulk_items": [
+            {
+                "row_id": "user_1",
+                "title": "User 1",
+                "ticket_fields": [
+                    {"key": "subject", "display_value": "Onboard User 1", "required": True, "status": "confirmed"},
+                    {"key": "contact", "display_value": "User One <one@example.com>", "required": True, "status": "confirmed"},
+                ],
+                "description_sections": [{"key": "description", "title": "Description", "content": "Create onboarding ticket for User 1.", "status": "confirmed"}],
+            },
+            {
+                "row_id": "user_2",
+                "title": "User 2",
+                "ticket_fields": [
+                    {"key": "subject", "display_value": "Onboard User 2", "required": True, "status": "confirmed"},
+                    {"key": "contact", "display_value": "User Two <two@example.com>", "required": True, "status": "confirmed"},
+                ],
+                "description_sections": [{"key": "description", "title": "Description", "content": "Create onboarding ticket for User 2.", "status": "confirmed"}],
+            },
+        ],
+    }
+    created = client.post("/api/v1/drafts", json=payload).json()
+    assert created["validation_result"]["valid"] is True
+    response = client.post(
+        f"/api/v1/drafts/{created['draft_id']}/approve-and-submit",
+        json={"confirmation": "CREATE BULK"},
+    )
+    assert response.status_code == 200
+    assert len(sent) == 2
+    assert sent[0]["subject"] == "Onboard User 1"
+    assert sent[0]["email"] == "one@example.com"
+    assert response.json()["ticket_id"] == "2001,2002"
+
+
+def test_agent_api_token_is_required_when_configured(settings: Settings):
+    protected = replace(settings, agent_api_token="agent-secret")
+    client = TestClient(create_app(protected))
+    assert client.get("/api/v1/metadata").status_code == 401
+    assert client.get("/api/v1/metadata", headers={"X-Agent-Token": "agent-secret"}).status_code == 200
 
 
 def test_agent_routes_respect_emergency_stop(settings: Settings):

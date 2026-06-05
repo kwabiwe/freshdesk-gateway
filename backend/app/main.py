@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -31,6 +31,7 @@ from .models import (
     TicketDraftRequest,
     AgentDraftEnvelope,
     AgentDraftPatch,
+    AgentApprovalRequest,
     AgentFeedbackRequest,
 )
 from .agent_draft_store import AgentDraftStore
@@ -161,38 +162,63 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         overview = services.schema_cache.overview()
         return {**overview, "required_fields": services.schema_cache.required_ticket_fields()}
 
+    def require_agent_api_auth(request: Request) -> None:
+        token = services.settings().agent_api_token
+        if not token:
+            return
+        bearer = request.headers.get("authorization", "")
+        supplied = ""
+        if bearer.lower().startswith("bearer "):
+            supplied = bearer[7:].strip()
+        supplied = supplied or request.headers.get("x-agent-token", "").strip()
+        if supplied != token:
+            raise HTTPException(status_code=401, detail="Agent API token is required.")
+
     @app.get("/api/v1/metadata")
-    def agent_metadata():
+    def agent_metadata(request: Request):
+        require_agent_api_auth(request)
         services.emergency.require_clear()
         return services.agent.metadata()
 
+    @app.get("/api/v1/drafts")
+    def agent_list_drafts(request: Request, limit: int = Query(default=50, ge=1, le=500)):
+        require_agent_api_auth(request)
+        services.emergency.require_clear()
+        return services.agent.list(limit=limit)
+
     @app.post("/api/v1/drafts")
-    def agent_create_draft(body: AgentDraftEnvelope):
+    def agent_create_draft(body: AgentDraftEnvelope, request: Request):
+        require_agent_api_auth(request)
         services.emergency.require_clear()
         return services.agent.create(body)
 
     @app.get("/api/v1/drafts/{draft_id}")
-    def agent_get_draft(draft_id: str):
+    def agent_get_draft(draft_id: str, request: Request):
+        require_agent_api_auth(request)
         services.emergency.require_clear()
         return services.agent.get(draft_id)
 
     @app.patch("/api/v1/drafts/{draft_id}")
-    def agent_update_draft(draft_id: str, body: AgentDraftPatch):
+    def agent_update_draft(draft_id: str, body: AgentDraftPatch, request: Request):
+        require_agent_api_auth(request)
         services.emergency.require_clear()
         return services.agent.update(draft_id, body)
 
     @app.post("/api/v1/drafts/{draft_id}/validate")
-    def agent_validate_draft(draft_id: str):
+    def agent_validate_draft(draft_id: str, request: Request):
+        require_agent_api_auth(request)
         services.emergency.require_clear()
         return services.agent.validate(draft_id)
 
     @app.post("/api/v1/drafts/{draft_id}/approve-and-submit")
-    def agent_approve_and_submit(draft_id: str):
+    def agent_approve_and_submit(draft_id: str, body: AgentApprovalRequest, request: Request):
+        require_agent_api_auth(request)
         services.emergency.require_clear()
-        return services.agent.approve_and_submit(draft_id)
+        return services.agent.approve_and_submit(draft_id, body.confirmation)
 
     @app.post("/api/v1/feedback/approved-drafts")
-    def agent_feedback(body: AgentFeedbackRequest):
+    def agent_feedback(body: AgentFeedbackRequest, request: Request):
+        require_agent_api_auth(request)
         services.emergency.require_clear()
         return services.agent.record_feedback(body)
 

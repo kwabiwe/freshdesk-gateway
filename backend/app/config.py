@@ -32,6 +32,7 @@ class Settings:
     draft_expiry_minutes: int
     database_path: Path
     stop_file: Path
+    agent_api_token: str = ""
     change_drafting_skill: str = "change_management_drafting"
 
     @property
@@ -67,6 +68,7 @@ class Settings:
             "draft_expiry_minutes": self.draft_expiry_minutes,
             "database_path": str(self.database_path),
             "stop_file": str(self.stop_file),
+            "agent_api_auth_required": bool(self.agent_api_token),
             "change_drafting_skill": self.change_drafting_skill,
             "cloud_ai_enabled": False,
         }
@@ -122,5 +124,6 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         draft_expiry_minutes=_as_int("DRAFT_EXPIRY_MINUTES", 30),
         database_path=project_path("DATABASE_PATH", "./data/freshdesk_gateway.db"),
         stop_file=project_path("STOP_FILE", "./STOP"),
+        agent_api_token=os.getenv("AGENT_API_TOKEN", "").strip(),
         change_drafting_skill=os.getenv("CHANGE_DRAFTING_SKILL", "change_management_drafting").strip(),
     )

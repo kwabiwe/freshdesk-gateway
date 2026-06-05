@@ -125,6 +125,9 @@ class FreshdeskClient:
     def create_ticket(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.request("POST", "/api/v2/tickets", action_type="ticket_create", json=payload)
 
+    def update_ticket(self, ticket_id: str | int, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.request("PUT", f"/api/v2/tickets/{ticket_id}", action_type="ticket_update", json=payload)
+
     def list_tickets(self, **params: Any) -> list[dict[str, Any]]:
         return self.request("GET", "/api/v2/tickets", action_type="list_related_tickets", params=params)
 

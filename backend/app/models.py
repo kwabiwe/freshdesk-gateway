@@ -167,14 +167,29 @@ class AgentValidation(BaseModel):
     valid: bool = True
 
 
+class AgentBulkItem(BaseModel):
+    row_id: str = ""
+    title: str = ""
+    ticket_profile: Literal["standard", "change"] | None = None
+    ticket_fields: list[AgentTicketField] = Field(default_factory=list)
+    description_sections: list[AgentDescriptionSection] = Field(default_factory=list)
+    rendered_description: str = ""
+    sources: list[AgentSource] = Field(default_factory=list)
+    assumptions: list[AgentAssumption] = Field(default_factory=list)
+    missing_information: list[AgentMissingInformation] = Field(default_factory=list)
+    validation: AgentValidation = Field(default_factory=AgentValidation)
+
+
 class AgentDraftEnvelope(BaseModel):
     schema_version: Literal["a24.freshdesk_draft.v1"]
     draft_id: str = ""
     mode: Literal["create", "update", "bulk_create"] = "create"
+    ticket_profile: Literal["standard", "change"] = "change"
     status: Literal["ready_for_review", "ready_with_gaps", "blocked", "conflict"] = "ready_for_review"
     target_ticket_id: int | str | None = None
     ticket_fields: list[AgentTicketField] = Field(default_factory=list)
     description_sections: list[AgentDescriptionSection] = Field(default_factory=list)
+    bulk_items: list[AgentBulkItem] = Field(default_factory=list)
     rendered_description: str = ""
     sources: list[AgentSource] = Field(default_factory=list)
     assumptions: list[AgentAssumption] = Field(default_factory=list)
@@ -188,6 +203,10 @@ class AgentDraftPatch(BaseModel):
     reason: str = ""
     ticket_fields: list[AgentTicketField] | None = None
     description_sections: list[AgentDescriptionSection] | None = None
+
+
+class AgentApprovalRequest(BaseModel):
+    confirmation: str
 
 
 class AgentFeedbackRequest(BaseModel):

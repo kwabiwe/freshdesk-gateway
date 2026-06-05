@@ -42,6 +42,7 @@ APP_HOST=127.0.0.1
 APP_PORT=8787
 DRAFT_EXPIRY_MINUTES=30
 CHANGE_DRAFTING_SKILL=change_management_drafting
+AGENT_API_TOKEN=
 ```
 
 Use the Freshdesk subdomain only for `FRESHDESK_DOMAIN`, unless you deliberately provide the full Freshdesk base URL. The `.env` file is excluded from Git.
@@ -196,6 +197,8 @@ Drafts are local SQLite records with an expiry time. Validation checks:
 
 The local model can suggest editable values but cannot approve them. A ticket is created only after you review the exact draft and type the approval phrase.
 
+AI Agent drafts use the same hard approval pattern. Create mode requires `CREATE`, update mode requires `UPDATE`, and bulk-create mode requires `CREATE BULK`.
+
 ## Rate Limits
 
 Defaults:
@@ -246,7 +249,39 @@ Open **Related tickets** and run the constrained search. The gateway uses `MY_NA
 
 The gateway is provider-neutral. Any local AI agent can call the existing REST API at `http://127.0.0.1:8787/api`, or the private Tailscale Serve URL when the adapter runs on another Tailnet device.
 
-Safe endpoint families already exist for health, stop/resume, schema sync, directory lookups, drafting, validation, approval, selected batch creation, related-ticket listing, local-model summarisation, and audit viewing.
+Set `AGENT_API_TOKEN` to require a bearer token or `X-Agent-Token` header on `/api/v1` routes. This is intended for the Mac Mini to MacBook gateway path. The browser review page has an **Agent API token** field on the AI Agent API tab for local testing when this is enabled.
+
+Safe endpoint families already exist for health, stop/resume, schema sync, directory lookups, drafting, validation, typed approval, selected batch creation, related-ticket listing, local-model summarisation, and audit viewing.
+
+The review page is a real inbox, not a demo surface. It loads Freshdesk metadata, tries the last reviewed draft ID from browser storage, then falls back to `GET /api/v1/drafts?limit=1`. If no agent has submitted a draft, it shows an empty waiting state instead of creating example data.
+
+Minimum OpenClaw-to-gateway flow:
+
+1. Start the gateway on the MacBook and run Freshdesk schema sync from the UI.
+2. Expose it privately with `scripts/tailnet-serve.sh` if OpenClaw is running on another Tailnet device.
+3. Set `AGENT_API_TOKEN` in `.env` and give the same token to the OpenClaw caller.
+4. OpenClaw fetches `GET /api/v1/metadata` to see current Freshdesk fields, groups, agents, forms, defaults, and schema-sync state.
+5. OpenClaw submits a versioned draft to `POST /api/v1/drafts`.
+6. You review and edit the draft in the AI Agent review page.
+7. The gateway converts the approved ledger into the Freshdesk create/update/bulk payload and sends it only after the exact typed approval phrase.
+8. OpenClaw can fetch `GET /api/v1/drafts/{id}` after approval to read the `feedback_payload`, including final fields, generated Freshdesk payload, changed fields, and created ticket ID.
+
+For command-line testing from OpenClaw or another Tailnet machine:
+
+```bash
+export FRESHDESK_GATEWAY_URL="https://your-macbook-tailnet-url"
+export AGENT_API_TOKEN="same-token-as-the-gateway"
+scripts/openclaw-gateway.py metadata
+scripts/openclaw-gateway.py list --limit 5
+scripts/openclaw-gateway.py submit path/to/draft-envelope.json
+scripts/openclaw-gateway.py get agd_123
+```
+
+The AI Agent handoff supports three modes:
+
+- `create` creates one reviewed Freshdesk ticket after `CREATE`.
+- `update` updates the existing `target_ticket_id` after `UPDATE`; default requester/contact values are not sent unless the agent or reviewer explicitly sets that field.
+- `bulk_create` accepts one template plus row-level `bulk_items`, validates every row first, then creates the set only after `CREATE BULK`.
 
 Do not add an arbitrary Freshdesk passthrough endpoint. Do not expose the API key. Keep the same validation, approval, rate-limit, audit, and emergency-stop path for every future interface.
 

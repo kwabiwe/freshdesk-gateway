@@ -32,13 +32,15 @@ class TicketValidator:
             isinstance(value, str) and value.strip().lower() in {"tbd", "not provided", "unknown"}
         )
 
-    def validate(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def validate(self, payload: dict[str, Any], *, require_requester: bool = True) -> dict[str, Any]:
         missing: list[dict[str, Any]] = []
         warnings: list[str] = []
         required_fields = self.schema.required_ticket_fields()
         for field in required_fields:
             name = field.get("name", "")
             api_name = DEFAULT_FIELD_MAP.get(name, name)
+            if not require_requester and api_name in {"email", "requester_id"}:
+                continue
             if name.startswith("cf_"):
                 value = payload.get("custom_fields", {}).get(name)
             else:
@@ -55,7 +57,10 @@ class TicketValidator:
                 )
 
         # Freshdesk's ticket create endpoint needs these API-level values even before a schema sync.
-        for key, label in (("email", "Requester email"), ("subject", "Subject"), ("description", "Description")):
+        api_required = [("subject", "Subject"), ("description", "Description")]
+        if require_requester:
+            api_required.insert(0, ("email", "Requester email"))
+        for key, label in api_required:
             if self._missing(payload.get(key)) and not any(item["name"] == key for item in missing):
                 missing.append(
                     {"name": key, "label": label, "type": "text", "allowed_values": [], "user_input_required": True}
