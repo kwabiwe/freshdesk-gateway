@@ -204,6 +204,7 @@ OpenClaw sends semantic intent:
 - `group`
 - `agent`
 - `priority`
+- schema-backed `cf_*` fields listed in `freshdesk_form_profiles`
 - `description_sections`
 
 The gateway maps reviewed fields to Freshdesk:
@@ -215,8 +216,10 @@ The gateway maps reviewed fields to Freshdesk:
 - `agent` -> `responder_id`
 - `status` -> Freshdesk status integer
 - `priority` -> Freshdesk priority integer
-- `ticket_type` -> `type` and/or a matching custom field if Freshdesk exposes one
-- `business_impact`, `product`, `form`, `ticket_type` -> matching `cf_*` fields when discovered in `ticket_fields`
+- visible `form` -> A24 custom `cf_form2`
+- visible `ticket_type` -> A24 custom `cf_type` when that field exists
+- schema-backed `cf_*` ledger fields -> `custom_fields`
+- Freshdesk's default API `type` is used only when the reviewed field binds to the default `ticket_type` field
 
 The gateway owns Freshdesk IDs and validation. OpenClaw should not create, update, close, or otherwise write directly to Freshdesk.
 

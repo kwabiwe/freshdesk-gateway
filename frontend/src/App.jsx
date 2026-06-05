@@ -517,7 +517,26 @@ function ActionCard({ icon: Icon, title, text, onClick }) {
   );
 }
 
-function optionRecords(metadata, key, currentValue) {
+function schemaFieldForReviewField(metadata, field) {
+  const exactName = field?.schema_field_name || field?.key || "";
+  const exact = (metadata?.ticket_fields || []).find((item) => item.name === exactName);
+  if (exact) return exact;
+  const preferred = {
+    form: ["cf_form2"],
+    ticket_type: ["cf_type", "cf_ticket_type"],
+    business_impact: ["cf_business_impact723800"],
+    customer: ["cf_customer967575"],
+  }[field?.key] || [];
+  for (const name of preferred) {
+    const match = (metadata?.ticket_fields || []).find((item) => item.name === name);
+    if (match) return match;
+  }
+  return null;
+}
+
+function optionRecords(metadata, field, currentValue) {
+  const key = field?.key || "";
+  const blank = { value: "", label: "--" };
   const includeCurrent = (items) => {
     const value = currentValue || "";
     if (!value || items.some((item) => item.value === value || item.label === value)) return items;
@@ -527,15 +546,9 @@ function optionRecords(metadata, key, currentValue) {
   if (key === "priority") return includeCurrent(["Low", "Medium", "High", "Urgent"].map((value) => ({ value, label: value })));
   if (key === "group") return includeCurrent((metadata?.groups || []).map((group) => ({ value: group.name, label: group.name })));
   if (key === "agent") return includeCurrent((metadata?.agents || []).map((agent) => ({ value: agent.contact?.name || agent.name || String(agent.id), label: agent.contact?.name || agent.name || String(agent.id) })));
-  if (key === "form") return includeCurrent((metadata?.ticket_forms || []).map((form) => ({ value: form.title || form.name || String(form.id), label: form.title || form.name || String(form.id) })));
-  const schemaField = (metadata?.ticket_fields || []).find((field) => {
-    const text = `${field.name || ""} ${field.label || ""}`.toLowerCase().replaceAll("_", " ");
-    if (key === "business_impact") return text.includes("business") && text.includes("impact");
-    if (key === "ticket_type") return text.includes("type");
-    return false;
-  });
+  const schemaField = schemaFieldForReviewField(metadata, field);
   const choices = choiceValues(schemaField?.choices).map((value) => ({ value: String(value), label: String(value) }));
-  return includeCurrent(choices);
+  return includeCurrent(choices.length ? [blank, ...choices] : []);
 }
 
 function fieldValue(field) {
@@ -891,7 +904,7 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
             </div>
             {ticketFields.map((field, index) => {
               const value = fieldValue(field);
-              const options = optionRecords(metadata, field.key, value);
+              const options = optionRecords(metadata, field, value);
               const original = events.find((event) => event.field_key === field.key)?.old_value || value;
               return (
                 <article className={cls("ledger-row", changedKeys.has(field.key) && "ledger-row-changed")} key={field.key}>

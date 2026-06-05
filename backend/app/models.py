@@ -132,6 +132,7 @@ class AgentTicketField(BaseModel):
     key: str
     label: str = ""
     kind: Literal["short_text", "enum", "entity_ref", "long_text"] = "short_text"
+    schema_field_name: str = ""
     value: Any = None
     display_value: str = ""
     resolved_id: int | str | None = None

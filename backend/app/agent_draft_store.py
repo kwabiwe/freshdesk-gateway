@@ -29,11 +29,86 @@ FIELD_LABELS = {
     "subject": "Subject",
     "form": "Form",
     "ticket_type": "Ticket Type",
+    "customer": "Customer",
     "status": "Status",
     "business_impact": "Business Impact",
     "group": "Group",
     "agent": "Agent",
     "priority": "Priority",
+}
+BASE_FIELD_ORDER = ["product", "contact", "subject", "form"]
+COMMON_FIELD_ORDER = ["status", "business_impact", "group", "agent", "priority"]
+SCHEMA_FIELD_KEY_ALIASES = {
+    "product": "product",
+    "requester": "contact",
+    "subject": "subject",
+    "cf_form2": "form",
+    "cf_type": "ticket_type",
+    "cf_ticket_type": "ticket_type",
+    "cf_customer967575": "customer",
+    "cf_business_impact723800": "business_impact",
+    "status": "status",
+    "group": "group",
+    "agent": "agent",
+    "priority": "priority",
+}
+FIELD_SCHEMA_PREFERENCES = {
+    "product": ("product",),
+    "contact": ("requester",),
+    "subject": ("subject",),
+    "form": ("cf_form2",),
+    "ticket_type": ("cf_type", "cf_ticket_type"),
+    "customer": ("cf_customer967575",),
+    "status": ("status",),
+    "business_impact": ("cf_business_impact723800",),
+    "group": ("group",),
+    "agent": ("agent",),
+    "priority": ("priority",),
+}
+CHANGE_REQUEST_FIELD_NAMES = [
+    "cf_background_for_the_change",
+    "cf_change_type",
+    "cf_requested_by",
+    "cf_change_owner",
+    "cf_change_catergory",
+    "cf_chg_business_impact",
+    "cf_change_state",
+    "cf_approval_state",
+    "cf_type",
+    "cf_customer967575",
+    "status",
+    "cf_business_impact723800",
+    "group",
+    "agent",
+    "priority",
+]
+INCIDENT_REQUEST_FIELD_NAMES = [
+    "cf_type",
+    "cf_rack",
+    "cf_customer967575",
+    "status",
+    "cf_business_impact723800",
+    "group",
+    "agent",
+    "priority",
+]
+PROFESSIONAL_SERVICES_FIELD_NAMES = [
+    "cf_customer967575",
+    "cf_requested_by",
+    "cf_reminder_date",
+    "status",
+    "group",
+    "agent",
+    "priority",
+]
+FORM_FIELD_PROFILES = {
+    "changerequest": CHANGE_REQUEST_FIELD_NAMES,
+    "a24incident": INCIDENT_REQUEST_FIELD_NAMES,
+    "customerincident": INCIDENT_REQUEST_FIELD_NAMES,
+    "a24request": INCIDENT_REQUEST_FIELD_NAMES,
+    "customerrequest": INCIDENT_REQUEST_FIELD_NAMES,
+    "professionalservices": PROFESSIONAL_SERVICES_FIELD_NAMES,
+    "scheduledprofessionalservicesengagement": PROFESSIONAL_SERVICES_FIELD_NAMES,
 }
 REQUIRED_SECTIONS_BY_PROFILE = {
     "change": {"scope", "implementation", "rollback", "verification", "config_items"},
@@ -107,10 +182,12 @@ class AgentDraftStore:
             "agents": self.schema.get("agents", []),
             "companies": self.schema.get("companies", []),
             "ticket_forms": self.schema.get("ticket_forms", []),
+            "freshdesk_form_profiles": self._form_profiles(),
             "last_sync": overview["last_sync"],
             "freshdesk_form_binding": {
-                "status": "tenant_verification_needed",
-                "message": "Forms are synced for review and validation. Confirm how A24's Freshdesk tenant binds a selected form during API ticket creation before hard-coding submission.",
+                "status": "custom_field_bound",
+                "field_name": "cf_form2",
+                "message": "A24's visible Form dropdown is the custom cf_form2 field. The review ledger expands fields from that selected form profile before approval.",
             },
         }
 
@@ -340,7 +417,7 @@ class AgentDraftStore:
         }
 
     def _normalised(self, envelope: AgentDraftEnvelope) -> AgentDraftEnvelope:
-        envelope.ticket_fields = self._normalised_fields(envelope.ticket_fields)
+        envelope.ticket_fields = self._normalised_fields(envelope.ticket_fields, envelope.ticket_profile)
         envelope.rendered_description = self._render_description(envelope.description_sections)
         if envelope.mode == "bulk_create":
             envelope.bulk_items = self._normalised_bulk_items(envelope)
@@ -348,15 +425,92 @@ class AgentDraftStore:
         envelope.status = "ready_for_review" if envelope.validation.valid else "ready_with_gaps"
         return envelope
 
-    def _normalised_fields(self, ticket_fields) -> list[Any]:
+    def _normalised_fields(self, ticket_fields, ticket_profile: str = "change") -> list[Any]:
         existing = {field.key: field for field in ticket_fields}
+        form_value = self._field_value(existing.get("form"))
+        ordered_keys = self._field_order_for_form(form_value, ticket_profile)
+        ordered_keys.extend(key for key in existing if key not in ordered_keys)
         fields = []
-        for key in FIELD_LABELS:
+        for key in ordered_keys:
             field = existing.get(key)
+            schema_field = self._schema_field_for_key(key)
             if field is None:
-                field = self._default_field(key)
+                field = self._default_field(key, schema_field=schema_field, ticket_profile=ticket_profile)
+            elif schema_field and not field.schema_field_name:
+                field.schema_field_name = str(schema_field.get("name") or "")
             fields.append(self._resolved_field(field))
         return fields
+
+    def _field_order_for_form(self, form_value: Any, ticket_profile: str) -> list[str]:
+        keys = list(BASE_FIELD_ORDER)
+        keys.extend(self._review_key_for_schema_name(name) for name in self._profile_field_names(form_value, ticket_profile))
+        keys.extend(COMMON_FIELD_ORDER)
+        return list(dict.fromkeys(keys))
+
+    def _profile_field_names(self, form_value: Any, ticket_profile: str) -> list[str]:
+        profile = FORM_FIELD_PROFILES.get(_normalise(form_value))
+        if profile is not None:
+            return self._existing_schema_names(profile)
+        if ticket_profile == "change":
+            return self._existing_schema_names(CHANGE_REQUEST_FIELD_NAMES)
+        return self._existing_schema_names(INCIDENT_REQUEST_FIELD_NAMES)
+
+    def _form_profiles(self) -> list[dict[str, Any]]:
+        profiles = []
+        for form in self._choice_values_for_schema_name("cf_form2"):
+            field_names = self._profile_field_names(form, "change" if _normalise(form) == "changerequest" else "standard")
+            profiles.append(
+                {
+                    "form": form,
+                    "field_names": field_names,
+                    "fields": [self._compact_schema_field(field) for field in self._schema_fields_by_names(field_names)],
+                }
+            )
+        return profiles
+
+    @staticmethod
+    def _field_value(field: Any) -> Any:
+        if field is None:
+            return ""
+        return field.display_value or field.value or ""
+
+    def _existing_schema_names(self, names: list[str]) -> list[str]:
+        available = {str(field.get("name")) for field in self.schema.ticket_fields()}
+        return [name for name in names if name in available]
+
+    def _schema_fields_by_names(self, names: list[str]) -> list[dict[str, Any]]:
+        fields = {str(field.get("name")): field for field in self.schema.ticket_fields()}
+        return [fields[name] for name in names if name in fields]
+
+    def _review_key_for_schema_name(self, name: str) -> str:
+        return SCHEMA_FIELD_KEY_ALIASES.get(name, name)
+
+    def _choice_values_for_schema_name(self, name: str) -> list[str]:
+        field = next((item for item in self.schema.ticket_fields() if item.get("name") == name), None)
+        return _choice_values((field or {}).get("choices"))
+
+    @staticmethod
+    def _compact_schema_field(field: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "name": field.get("name"),
+            "label": field.get("label") or field.get("label_for_customers") or field.get("name"),
+            "type": field.get("type"),
+            "required_for_agents": bool(field.get("required_for_agents")),
+            "choices": _choice_values(field.get("choices")),
+        }
+
+    @staticmethod
+    def _field_kind(schema_field: dict[str, Any] | None, key: str) -> str:
+        if schema_field and schema_field.get("choices"):
+            return "enum"
+        field_type = str((schema_field or {}).get("type") or "")
+        if "text" in field_type and "custom" in field_type:
+            return "short_text"
+        if key in {"form", "ticket_type", "status", "business_impact", "priority"}:
+            return "enum"
+        if key in {"group", "agent"}:
+            return "entity_ref"
+        return "short_text"
 
     def _normalised_bulk_items(self, envelope: AgentDraftEnvelope):
         from .models import AgentBulkItem
@@ -368,7 +522,7 @@ class AgentDraftStore:
             item.row_id = item.row_id or f"row_{index:03d}"
             item.ticket_profile = item.ticket_profile or envelope.ticket_profile
             fields_by_key = {**template_fields, **{field.key: field for field in item.ticket_fields}}
-            item.ticket_fields = self._normalised_fields(list(fields_by_key.values()))
+            item.ticket_fields = self._normalised_fields(list(fields_by_key.values()), item.ticket_profile or envelope.ticket_profile)
             sections_by_key = {**template_sections, **{section.key: section for section in item.description_sections}}
             item.description_sections = list(sections_by_key.values())
             item.rendered_description = self._render_description(item.description_sections)
@@ -382,24 +536,33 @@ class AgentDraftStore:
             items.append(item)
         return items
 
-    def _default_field(self, key: str):
+    def _default_field(self, key: str, schema_field: dict[str, Any] | None = None, ticket_profile: str = "change"):
         from .models import AgentTicketField
 
-        value = DEFAULT_FIELD_VALUES.get(key, "")
+        schema_name = str((schema_field or {}).get("name") or "")
+        default_values = self.defaults.defaults(ticket_profile)
+        value = (default_values.get("custom_fields") or {}).get(schema_name, DEFAULT_FIELD_VALUES.get(key, ""))
         return AgentTicketField(
             key=key,
-            label=FIELD_LABELS[key],
-            kind="enum" if key in {"form", "ticket_type", "status", "business_impact", "priority"} else "short_text",
+            label=(schema_field or {}).get("label") or (schema_field or {}).get("label_for_customers") or FIELD_LABELS.get(key, key.replace("_", " ").title()),
+            kind=self._field_kind(schema_field, key),
+            schema_field_name=schema_name,
             value=value,
             display_value=value,
-            required=key in FIELD_LABELS,
+            required=bool((schema_field or {}).get("required_for_agents")) or key in FIELD_LABELS,
             status="confirmed" if value else "missing",
             confidence=1.0 if value else None,
-            why_this_value="Configured A24 gateway default." if value else "",
+            why_this_value="A24 gateway default from synced Freshdesk schema." if value else "",
             source="default",
         )
 
     def _resolved_field(self, field):
+        schema_field = self._schema_field_for_field(field)
+        if schema_field:
+            field.schema_field_name = str(schema_field.get("name") or "")
+            field.label = schema_field.get("label") or schema_field.get("label_for_customers") or field.label
+            field.kind = self._field_kind(schema_field, field.key)
+            field.required = bool(schema_field.get("required_for_agents")) or field.required
         field.label = field.label or FIELD_LABELS.get(field.key, field.key.replace("_", " ").title())
         if field.key in DEFAULT_FIELD_VALUES and _missing(field.value) and _missing(field.display_value):
             field.value = DEFAULT_FIELD_VALUES[field.key]
@@ -413,13 +576,14 @@ class AgentDraftStore:
         if field.key == "agent":
             return self._resolve_agent(field)
         if field.key == "form":
-            field = self._resolve_entity(field, self.schema.get("ticket_forms", []), "Form", name_keys=("title", "name"))
-            return field
+            return self._resolve_schema_choice(field)
         if field.key == "status":
             return self._resolve_fixed_choice(field, STATUS_CHOICES)
         if field.key == "priority":
             return self._resolve_fixed_choice(field, PRIORITY_CHOICES)
-        if field.key in {"business_impact", "product", "ticket_type"}:
+        if schema_field and schema_field.get("choices"):
+            return self._resolve_schema_choice(field)
+        if field.key in {"business_impact", "product", "ticket_type", "customer"}:
             return self._resolve_schema_choice(field)
 
         if field.required and _missing(value):
@@ -481,7 +645,7 @@ class AgentDraftStore:
 
     def _resolve_schema_choice(self, field):
         value = field.display_value or _display(field.value)
-        schema_field = self._field_for_key(field.key)
+        schema_field = self._schema_field_for_field(field)
         raw_choices = (schema_field or {}).get("choices")
         choices = _choice_values(raw_choices)
         if not choices:
@@ -499,12 +663,29 @@ class AgentDraftStore:
             field.missing_reason = field.missing_reason or f"Choose an allowed value for {field.label}."
         return field
 
+    def _schema_field_for_field(self, field) -> dict[str, Any] | None:
+        if field.schema_field_name:
+            match = next((item for item in self.schema.ticket_fields() if item.get("name") == field.schema_field_name), None)
+            if match:
+                return match
+        return self._schema_field_for_key(field.key)
+
+    def _schema_field_for_key(self, key: str) -> dict[str, Any] | None:
+        if key.startswith("cf_"):
+            return next((field for field in self.schema.ticket_fields() if field.get("name") == key), None)
+        for name in FIELD_SCHEMA_PREFERENCES.get(key, ()):
+            match = next((field for field in self.schema.ticket_fields() if field.get("name") == name), None)
+            if match:
+                return match
+        return self._field_for_key(key)
+
     def _field_for_key(self, key: str) -> dict[str, Any] | None:
         terms = {
             "business_impact": {"business", "impact"},
             "form": {"form"},
             "product": {"product"},
             "ticket_type": {"ticket", "type"},
+            "customer": {"customer"},
         }.get(key, {key})
         for field in self.schema.ticket_fields():
             text = f"{field.get('name', '')} {field.get('label', '')}".lower().replace("_", " ")
@@ -551,7 +732,7 @@ class AgentDraftStore:
                 blocking.append(f"{field.label} is required.")
             if field.key != "form" and field.required and field.status in {"missing", "conflict", "needs_human_choice"}:
                 blocking.append(field.missing_reason or f"{field.label} needs review.")
-            if include_form_warning and field.key == "form":
+            if include_form_warning and field.key == "form" and not field.schema_field_name:
                 warnings.append("Confirm A24 Freshdesk form binding before using form selection for real API submission.")
         sections = {section.key: section for section in description_sections}
         for key in REQUIRED_SECTIONS_BY_PROFILE.get(ticket_profile, set()):
@@ -627,13 +808,10 @@ class AgentDraftStore:
         agent_id = fields.get("agent", {}).get("resolved_id")
         if agent_id not in (None, ""):
             payload["responder_id"] = int(agent_id)
-        ticket_type = value("ticket_type")
-        if ticket_type not in (None, ""):
-            payload["type"] = _display(ticket_type)
 
         custom_fields = dict(defaults.get("custom_fields", {}))
-        for key in ("business_impact", "product", "form", "ticket_type"):
-            self._apply_schema_field_to_payload(payload, custom_fields, key, fields.get(key, {}), value(key))
+        for key, field_record in fields.items():
+            self._apply_schema_field_to_payload(payload, custom_fields, key, field_record, value(key))
         if custom_fields:
             payload["custom_fields"] = custom_fields
         return payload
@@ -664,7 +842,11 @@ class AgentDraftStore:
     ) -> None:
         if field_value in (None, ""):
             return
-        field = self._field_for_key(key)
+        schema_name = str(field_value_record.get("schema_field_name") or "")
+        field = None
+        if schema_name:
+            field = next((item for item in self.schema.ticket_fields() if item.get("name") == schema_name), None)
+        field = field or self._schema_field_for_key(key)
         if not field:
             return
         name = str(field.get("name") or "")
@@ -673,6 +855,8 @@ class AgentDraftStore:
         elif name in {"product", "product_id"}:
             resolved = field_value_record.get("resolved_id")
             payload["product_id" if name == "product_id" else name] = int(resolved) if resolved not in (None, "") else field_value
+        elif name == "ticket_type":
+            payload["type"] = field_value
 
     def _feedback_payload(self, current: dict[str, Any], ticket_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         envelope = current["envelope"]

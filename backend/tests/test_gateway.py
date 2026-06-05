@@ -443,7 +443,7 @@ def change_schema(schema: SchemaCache):
     schema.put(
         "ticket_fields",
         [
-            {"name": "cf_background_for_the_change"},
+            {"name": "cf_background_for_the_change", "label": "Background for the Change"},
             {"name": "cf_form2", "choices": ["Change Request"]},
             {"name": "cf_type", "choices": ["Change"]},
             {"name": "cf_change_type", "choices": ["Standard", "Normal", "Emmergency"]},
@@ -862,6 +862,7 @@ def test_agent_draft_accepts_normalizes_and_resolves_metadata(settings: Settings
     services.schema_cache.put(
         "ticket_fields",
         [
+            {"name": "cf_form2", "label": "Form", "choices": ["Change Request", "A24 Incident"]},
             {"name": "cf_business_impact", "label": "Business Impact", "choices": ["Minor", "Major"]},
             {"name": "cf_ticket_type", "label": "Ticket Type", "choices": ["Change", "Incident"]},
         ],
@@ -872,10 +873,31 @@ def test_agent_draft_accepts_normalizes_and_resolves_metadata(settings: Settings
     fields = {field["key"]: field for field in body["envelope"]["ticket_fields"]}
     assert fields["group"]["resolved_id"] == 9
     assert fields["agent"]["resolved_id"] == 8
-    assert fields["form"]["resolved_id"] == 4
+    assert fields["form"]["schema_field_name"] == "cf_form2"
+    assert fields["form"]["display_value"] == "Change Request"
     assert fields["business_impact"]["display_value"] == "Minor"
     assert body["validation_result"]["valid"] is True
-    assert "form binding" in body["validation_result"]["warnings"][0].lower()
+    assert body["validation_result"]["warnings"] == []
+
+
+def test_agent_change_request_profile_adds_a24_form_fields(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    change_schema(services.schema_cache)
+    services.schema_cache.put("agents", [{"id": 8, "contact": {"name": "Kwabiwe Sibanda"}}])
+    services.schema_cache.put("groups", [{"id": 9, "name": "L3 Engineering"}])
+
+    response = TestClient(app).post("/api/v1/drafts", json=agent_payload())
+
+    assert response.status_code == 200
+    fields = {field["key"]: field for field in response.json()["envelope"]["ticket_fields"]}
+    assert fields["form"]["schema_field_name"] == "cf_form2"
+    assert fields["ticket_type"]["schema_field_name"] == "cf_type"
+    assert fields["ticket_type"]["display_value"] == "Change"
+    assert fields["cf_background_for_the_change"]["label"] == "Background for the Change"
+    assert fields["cf_change_owner"]["display_value"] == "Test User"
+    assert fields["cf_change_state"]["display_value"] == "Pending approval"
+    assert fields["cf_approval_state"]["display_value"] == "Not Yet Requested"
 
 
 def test_agent_lists_submitted_drafts_for_review_inbox(settings: Settings):
@@ -901,6 +923,13 @@ def test_agent_rejects_unsupported_schema_version(settings: Settings):
 
 def test_agent_patch_tracks_revision_and_feedback_payload(settings: Settings):
     app = create_app(settings)
+    app.state.services.schema_cache.put(
+        "ticket_fields",
+        [
+            {"name": "cf_form2", "label": "Form", "choices": ["Change Request"]},
+            {"name": "cf_ticket_type", "label": "Ticket Type", "choices": ["Change"]},
+        ],
+    )
     sent: list[dict[str, object]] = []
     app.state.services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 1234}
     client = TestClient(app)
@@ -925,7 +954,7 @@ def test_agent_patch_tracks_revision_and_feedback_payload(settings: Settings):
     assert submitted["approval_status"] == "submitted"
     assert submitted["ticket_id"] == "1234"
     assert sent[0]["subject"] == "Mailbox routing change - reviewed"
-    assert sent[0]["type"] == "Change"
+    assert sent[0]["custom_fields"]["cf_ticket_type"] == "Change"
     assert sent[0]["priority"] == 1
     assert sent[0]["status"] == 2
     assert submitted["feedback_payload"]["changed_fields"][0]["field_key"] == "subject"
