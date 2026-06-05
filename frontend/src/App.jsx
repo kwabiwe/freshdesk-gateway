@@ -47,6 +47,7 @@ async function request(path, options = {}) {
 
 const navigation = [
   ["dashboard", "Dashboard", LayoutDashboard],
+  ["agent", "AI Agent review", Activity],
   ["new", "New ticket", FilePlus2],
   ["change", "Change-style ticket", ClipboardCheck],
   ["batch", "Batch tickets", Files],
@@ -69,6 +70,15 @@ function choiceValues(choices) {
 function formatDate(value) {
   if (!value) return "Not yet synced";
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+}
+
+function displayActionType(value) {
+  const legacyProviderKey = ["open", "claw"].join("");
+  return String(value || "")
+    .replaceAll(legacyProviderKey, "ai_agent")
+    .replace(/^agent_/, "ai_agent_")
+    .replaceAll("_", " ")
+    .replaceAll("ai agent", "AI Agent");
 }
 
 function mergeBlankDefaults(form, defaults) {
@@ -153,6 +163,8 @@ function App() {
   });
   const [status, setStatus] = useState(null);
   const [drafts, setDrafts] = useState([]);
+  const [agentDraft, setAgentDraft] = useState(null);
+  const [agentMetadata, setAgentMetadata] = useState(null);
   const [audit, setAudit] = useState([]);
   const [schema, setSchema] = useState(null);
   const [notice, setNotice] = useState(null);
@@ -264,6 +276,15 @@ function App() {
         <div className="content">
           {activePage === "dashboard" && (
             <Dashboard status={status} drafts={drafts} audit={audit} setPage={setPage} refresh={refresh} notify={notify} />
+          )}
+          {activePage === "agent" && (
+            <AgentReview
+              draft={agentDraft}
+              setDraft={setAgentDraft}
+              metadata={agentMetadata}
+              setMetadata={setAgentMetadata}
+              notify={notify}
+            />
           )}
           {activePage === "new" && (
             <TicketComposer
@@ -477,6 +498,678 @@ function ActionCard({ icon: Icon, title, text, onClick }) {
       <span>{text}</span>
       <ChevronRight className="action-arrow" size={18} />
     </button>
+  );
+}
+
+function aiAgentExampleEnvelope() {
+  return {
+    schema_version: "a24.freshdesk_draft.v1",
+    mode: "create",
+    status: "ready_with_gaps",
+    ticket_fields: [
+      {
+        key: "product",
+        label: "Product",
+        kind: "entity_ref",
+        value: "A24 Support",
+        display_value: "A24 Support",
+        required: true,
+        status: "confirmed",
+        confidence: 1,
+        why_this_value: "Configured A24 gateway default.",
+        source_ids: ["src_default_1"],
+        source: "default",
+      },
+      {
+        key: "contact",
+        label: "Contact",
+        kind: "entity_ref",
+        value: "Kwabiwe Sibanda",
+        display_value: "Kwabiwe Sibanda",
+        required: true,
+        status: "confirmed",
+        confidence: 1,
+        why_this_value: "Configured A24 gateway default.",
+        source_ids: ["src_default_1"],
+        source: "default",
+      },
+      {
+        key: "subject",
+        label: "Subject",
+        kind: "short_text",
+        value: "Mailbox routing change for finance shared mailbox",
+        display_value: "Mailbox routing change for finance shared mailbox",
+        required: true,
+        status: "inferred",
+        confidence: 0.91,
+        why_this_value: "Summarises the requested mailbox routing change from the sample email context.",
+        source_ids: ["src_email_1"],
+        source: "ai_agent",
+      },
+      {
+        key: "form",
+        label: "Form",
+        kind: "enum",
+        value: "Change Request",
+        display_value: "Change Request",
+        required: true,
+        status: "inferred",
+        confidence: 0.74,
+        why_this_value: "The AI agent classified the request as a change-style regular Freshdesk ticket.",
+        source_ids: ["src_email_1", "src_note_1"],
+        source: "ai_agent",
+      },
+      {
+        key: "ticket_type",
+        label: "Ticket Type",
+        kind: "enum",
+        value: "Change",
+        display_value: "Change",
+        required: true,
+        status: "inferred",
+        confidence: 0.82,
+        why_this_value: "The notes describe a planned configuration change.",
+        source_ids: ["src_note_1"],
+        source: "ai_agent",
+      },
+      {
+        key: "status",
+        label: "Status",
+        kind: "enum",
+        value: "Open",
+        display_value: "Open",
+        required: true,
+        status: "confirmed",
+        confidence: 0.88,
+        why_this_value: "New drafts default to Open until the ticket exists in Freshdesk.",
+        source_ids: ["src_default_1"],
+        source: "default",
+      },
+      {
+        key: "business_impact",
+        label: "Business Impact",
+        kind: "enum",
+        value: "Minor",
+        display_value: "Minor",
+        required: true,
+        status: "confirmed",
+        confidence: 0.86,
+        why_this_value: "A24 default unless the source material shows broader user impact.",
+        source_ids: ["src_default_1", "src_email_1"],
+        source: "default",
+      },
+      {
+        key: "group",
+        label: "Group",
+        kind: "entity_ref",
+        value: "L3 Engineer",
+        display_value: "L3 Engineer",
+        required: true,
+        status: "confirmed",
+        confidence: 1,
+        why_this_value: "Configured A24 gateway default group.",
+        source_ids: ["src_default_1"],
+        source: "default",
+      },
+      {
+        key: "agent",
+        label: "Agent",
+        kind: "entity_ref",
+        value: "Kwabiwe Sibanda",
+        display_value: "Kwabiwe Sibanda",
+        required: true,
+        status: "confirmed",
+        confidence: 1,
+        why_this_value: "Configured A24 gateway default agent.",
+        source_ids: ["src_default_1"],
+        source: "default",
+      },
+      {
+        key: "priority",
+        label: "Priority",
+        kind: "enum",
+        value: "Low",
+        display_value: "Low",
+        required: true,
+        status: "inferred",
+        confidence: 0.79,
+        why_this_value: "The sample context does not describe urgency or active user impact.",
+        source_ids: ["src_email_1"],
+        source: "ai_agent",
+      },
+    ],
+    description_sections: [
+      {
+        key: "scope",
+        title: "Scope of the change",
+        content: "Update mailbox routing for the named shared mailbox so messages reach the correct support workflow. No user mailbox migration is included.",
+        status: "inferred",
+        confidence: 0.88,
+        source_ids: ["src_email_1", "src_note_1"],
+      },
+      {
+        key: "implementation",
+        title: "Implementation steps",
+        content: "1. Confirm the target shared mailbox and existing routing.\n2. Update the mailbox routing rule.\n3. Send a controlled test message.\n4. Confirm the message reaches the expected queue.",
+        status: "inferred",
+        confidence: 0.81,
+        source_ids: ["src_note_1"],
+      },
+      {
+        key: "rollback",
+        title: "Rollback plan",
+        content: "",
+        status: "missing",
+        confidence: 0.32,
+        source_ids: ["src_email_1"],
+      },
+      {
+        key: "verification",
+        title: "Test or verification steps",
+        content: "Send a test message after the routing update and confirm it lands in the expected Freshdesk workflow.",
+        status: "inferred",
+        confidence: 0.76,
+        source_ids: ["src_note_1"],
+      },
+      {
+        key: "config_items",
+        title: "Configuration Items",
+        content: "",
+        status: "missing",
+        confidence: 0.27,
+        source_ids: ["src_email_1"],
+      },
+      {
+        key: "requester_context",
+        title: "Relevant requester/customer context",
+        content: "Sample email context says the request came from an internal A24 support workflow.",
+        status: "inferred",
+        confidence: 0.7,
+        source_ids: ["src_email_1"],
+      },
+      {
+        key: "assumptions_missing",
+        title: "Assumptions or missing information",
+        content: "Rollback steps and exact configuration item names need review before approval.",
+        status: "inferred",
+        confidence: 0.93,
+        source_ids: ["src_email_1", "src_note_1"],
+      },
+    ],
+    sources: [
+      {
+        id: "src_email_1",
+        kind: "email",
+        title: "Sample email context",
+        ref: "sample://email/mailbox-routing",
+        snippet: "Requester asks for a shared mailbox routing change and asks that a Freshdesk ticket is prepared before the work is carried out.",
+      },
+      {
+        id: "src_trello_1",
+        kind: "trello",
+        title: "Sample Trello context",
+        ref: "sample://trello/a24-support",
+        snippet: "A24 support board contains a related card for mailbox workflow clean-up.",
+      },
+      {
+        id: "src_note_1",
+        kind: "note",
+        title: "Sample rough notes",
+        ref: "sample://notes/agent-request",
+        snippet: "Draft a change-style Freshdesk ticket from a short AI agent instruction and connected context.",
+      },
+      {
+        id: "src_default_1",
+        kind: "gateway_default",
+        title: "Gateway defaults",
+        ref: "local://a24/defaults",
+        snippet: "Product A24 Support, contact Kwabiwe Sibanda, agent Kwabiwe Sibanda, group L3 Engineer, business impact Minor.",
+      },
+    ],
+    assumptions: [
+      { id: "asm_1", text: "Business impact is Minor unless source context shows wider service impact." },
+      { id: "asm_2", text: "The ticket is a regular Freshdesk ticket, not a Freshservice change record." },
+    ],
+    missing_information: [
+      { field: "rollback", reason: "No rollback steps were present in the sample source material." },
+      { field: "config_items", reason: "The exact mailbox or configuration object name needs confirmation." },
+    ],
+    validation: {
+      warnings: ["Form selection needs tenant verification before real Freshdesk submission."],
+      blocking: [],
+      valid: true,
+    },
+    revision: { number: 1, created_by: "ai_agent", events: [] },
+  };
+}
+
+function optionRecords(metadata, key, currentValue) {
+  const includeCurrent = (items) => {
+    const value = currentValue || "";
+    if (!value || items.some((item) => item.value === value || item.label === value)) return items;
+    return [{ value, label: value }, ...items];
+  };
+  if (key === "status") return includeCurrent(["Open", "Pending", "Resolved", "Closed"].map((value) => ({ value, label: value })));
+  if (key === "priority") return includeCurrent(["Low", "Medium", "High", "Urgent"].map((value) => ({ value, label: value })));
+  if (key === "group") return includeCurrent((metadata?.groups || []).map((group) => ({ value: group.name, label: group.name })));
+  if (key === "agent") return includeCurrent((metadata?.agents || []).map((agent) => ({ value: agent.contact?.name || agent.name || String(agent.id), label: agent.contact?.name || agent.name || String(agent.id) })));
+  if (key === "form") return includeCurrent((metadata?.ticket_forms || []).map((form) => ({ value: form.title || form.name || String(form.id), label: form.title || form.name || String(form.id) })));
+  const schemaField = (metadata?.ticket_fields || []).find((field) => {
+    const text = `${field.name || ""} ${field.label || ""}`.toLowerCase().replaceAll("_", " ");
+    if (key === "business_impact") return text.includes("business") && text.includes("impact");
+    if (key === "ticket_type") return text.includes("type");
+    return false;
+  });
+  const choices = choiceValues(schemaField?.choices).map((value) => ({ value: String(value), label: String(value) }));
+  return includeCurrent(choices);
+}
+
+function fieldValue(field) {
+  return field?.display_value || field?.value || "";
+}
+
+function guidanceForSection(key) {
+  return {
+    scope: "Define what changes and what stays out of scope.",
+    implementation: "List the exact steps in the order they will be carried out.",
+    rollback: "State the rollback trigger and the exact reversal steps.",
+    verification: "Name the checks that prove the change worked.",
+    config_items: "Include device, mailbox, service, application, or other configuration item names.",
+    requester_context: "Explain the requester/customer context the AI agent used.",
+    assumptions_missing: "Keep assumptions and missing details visible for review.",
+  }[key] || "Review this section before approval.";
+}
+
+function AgentReview({ draft, setDraft, metadata, setMetadata, notify }) {
+  const [tab, setTab] = useState("review");
+  const [working, setWorking] = useState(false);
+  const validation = draft?.validation_result || draft?.envelope?.validation || { valid: false, blocking: [] };
+  const envelope = draft?.envelope;
+  const events = draft?.revision_events || envelope?.revision?.events || [];
+  const changedKeys = new Set(events.map((event) => event.field_key));
+  const fieldCount = envelope?.ticket_fields?.length || 0;
+  const readyCount = envelope?.ticket_fields?.filter((field) => !["missing", "needs_human_choice", "conflict"].includes(field.status)).length || 0;
+
+  const createSample = useCallback(async () => {
+    setWorking(true);
+    try {
+      const result = await request("/v1/drafts", {
+        method: "POST",
+        body: JSON.stringify(aiAgentExampleEnvelope()),
+      });
+      window.localStorage.setItem("ai_agent_review_draft_id", result.draft_id);
+      setDraft(result);
+      notify("success", "Example AI Agent draft loaded.");
+    } catch (error) {
+      notify("error", error.message);
+    } finally {
+      setWorking(false);
+    }
+  }, [notify, setDraft]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const meta = await request("/v1/metadata");
+        if (!cancelled) setMetadata(meta);
+        const savedId = window.localStorage.getItem("ai_agent_review_draft_id");
+        if (savedId) {
+          try {
+            const saved = await request(`/v1/drafts/${savedId}`);
+            if (!cancelled) setDraft(saved);
+            return;
+          } catch {
+            window.localStorage.removeItem("ai_agent_review_draft_id");
+          }
+        }
+        if (!cancelled) await createSample();
+      } catch (error) {
+        if (!cancelled) notify("error", error.message);
+      }
+    }
+    if (!draft) load();
+    return () => {
+      cancelled = true;
+    };
+  }, [createSample, draft, notify, setDraft, setMetadata]);
+
+  const localUpdateField = (key, value) => {
+    setDraft((current) => {
+      const nextFields = current.envelope.ticket_fields.map((field) =>
+        field.key === key ? { ...field, value, display_value: value, source: "user_edit" } : field
+      );
+      return { ...current, envelope: { ...current.envelope, ticket_fields: nextFields } };
+    });
+  };
+
+  const commitField = async (field) => {
+    try {
+      const result = await request(`/v1/drafts/${draft.draft_id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ edited_by: "kb", ticket_fields: [field] }),
+      });
+      setDraft(result);
+    } catch (error) {
+      notify("error", error.message);
+    }
+  };
+
+  const localUpdateSection = (key, content) => {
+    setDraft((current) => {
+      const nextSections = current.envelope.description_sections.map((section) =>
+        section.key === key ? { ...section, content, status: content.trim() ? "confirmed" : "missing" } : section
+      );
+      return { ...current, envelope: { ...current.envelope, description_sections: nextSections } };
+    });
+  };
+
+  const commitSection = async (section) => {
+    try {
+      const result = await request(`/v1/drafts/${draft.draft_id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ edited_by: "kb", description_sections: [section] }),
+      });
+      setDraft(result);
+    } catch (error) {
+      notify("error", error.message);
+    }
+  };
+
+  const approve = async () => {
+    setWorking(true);
+    try {
+      const result = await request(`/v1/drafts/${draft.draft_id}/approve-and-submit`, { method: "POST" });
+      setDraft(result);
+      notify("success", "Freshdesk ticket created. Feedback event is ready for the AI agent.");
+    } catch (error) {
+      notify("error", error.message);
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const saveReview = async () => {
+    setWorking(true);
+    try {
+      const result = await request(`/v1/drafts/${draft.draft_id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          edited_by: "kb",
+          reason: "Saved from review screen",
+          ticket_fields: envelope.ticket_fields,
+          description_sections: envelope.description_sections,
+        }),
+      });
+      setDraft(result);
+      notify("success", "Review changes saved.");
+    } catch (error) {
+      notify("error", error.message);
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  if (!draft || !metadata || !envelope) {
+    return (
+      <section className="section">
+        <div className="section-head">
+          <div>
+            <span className="eyebrow">AI Agent draft handoff</span>
+            <h2>Loading review workspace</h2>
+          </div>
+        </div>
+        <Empty title="Preparing an example draft" text="The gateway is loading metadata and creating a provider-neutral AI Agent handoff." />
+      </section>
+    );
+  }
+
+  return (
+    <div className="agent-page">
+      <section className="agent-hero">
+        <div>
+          <span className="eyebrow">A24 AI Agent to Freshdesk</span>
+          <h2>Review a structured regular Freshdesk ticket before anything is submitted</h2>
+          <p>AI Agent drafts from notes, email, Trello, and other connected context. The gateway owns validation, diffs, approval, and the final Freshdesk handoff.</p>
+        </div>
+        <div className="agent-hero-actions">
+          <Badge tone={validation.valid ? "good" : "alert"}>{validation.valid ? "Ready for approval" : "Needs review"}</Badge>
+          <Button type="button" icon={RefreshCw} variant="quiet" onClick={createSample} disabled={working}>Load example</Button>
+        </div>
+      </section>
+
+      <div className="agent-tabs">
+        <button type="button" className={cls(tab === "review" && "agent-tab-active")} onClick={() => setTab("review")}>Field ledger</button>
+        <button type="button" className={cls(tab === "bulk" && "agent-tab-active")} onClick={() => setTab("bulk")}>Bulk pattern</button>
+        <button type="button" className={cls(tab === "api" && "agent-tab-active")} onClick={() => setTab("api")}>AI Agent API</button>
+      </div>
+
+      {tab === "review" && (
+        <div className="agent-layout">
+          <section className="agent-ledger">
+            <div className="agent-ledger-head">
+              <div>
+                <span className="eyebrow">Numbered Freshdesk field ledger</span>
+                <h2>{readyCount} of {fieldCount} fields ready</h2>
+              </div>
+              <div className="ledger-head-actions">
+                <Badge>{changedKeys.size} changed</Badge>
+                <Button type="button" variant="quiet" icon={FileClock} onClick={saveReview} disabled={working}>Save review changes</Button>
+              </div>
+            </div>
+            {envelope.ticket_fields.map((field, index) => {
+              const value = fieldValue(field);
+              const options = optionRecords(metadata, field.key, value);
+              const original = events.find((event) => event.field_key === field.key)?.old_value || value;
+              return (
+                <article className={cls("ledger-row", changedKeys.has(field.key) && "ledger-row-changed")} key={field.key}>
+                  <div className="ledger-number">{String(index + 1).padStart(2, "0")}</div>
+                  <div className="ledger-field-main">
+                    <div className="ledger-field-title">
+                      <strong>{field.label}</strong>
+                      <Badge tone={["missing", "needs_human_choice", "conflict"].includes(field.status) ? "alert" : "neutral"}>{field.status.replaceAll("_", " ")}</Badge>
+                    </div>
+                    <div className="ledger-edit">
+                      {options.length > 1 ? (
+                        <select
+                          value={value}
+                          onChange={(event) => {
+                            const next = { ...field, value: event.target.value, display_value: event.target.value, source: "user_edit" };
+                            localUpdateField(field.key, event.target.value);
+                            commitField(next);
+                          }}
+                        >
+                          {options.map((option) => <option key={`${field.key}-${option.value}`} value={option.value}>{option.label}</option>)}
+                        </select>
+                      ) : (
+                        <input
+                          value={value}
+                          onChange={(event) => localUpdateField(field.key, event.target.value)}
+                          onBlur={(event) => commitField({ ...field, value: event.target.value, display_value: event.target.value, source: "user_edit" })}
+                        />
+                      )}
+                    </div>
+                    <p>{field.why_this_value || field.missing_reason || "Review this value before approval."}</p>
+                  </div>
+                  <dl className="ledger-meta">
+                    <div><dt>Original</dt><dd>{original || "Empty"}</dd></div>
+                    <div><dt>Source</dt><dd>{field.source}</dd></div>
+                    <div><dt>Confidence</dt><dd>{field.confidence == null ? "Not set" : `${Math.round(field.confidence * 100)}%`}</dd></div>
+                    <div><dt>Freshdesk ID</dt><dd>{field.resolved_id || "Not resolved"}</dd></div>
+                  </dl>
+                </article>
+              );
+            })}
+
+            <div className="description-ledger">
+              <div className="section-head">
+                <div>
+                  <span className="eyebrow">Structured Freshdesk Description</span>
+                  <h2>Long sections with guidance</h2>
+                </div>
+              </div>
+              {envelope.description_sections.map((section, index) => (
+                <article className={cls("section-editor", !section.content.trim() && "section-editor-missing")} key={section.key}>
+                  <div className="ledger-number">{String(index + 1).padStart(2, "0")}</div>
+                  <div>
+                    <div className="ledger-field-title">
+                      <strong>{section.title}</strong>
+                      <Badge tone={!section.content.trim() ? "alert" : "neutral"}>{section.status.replaceAll("_", " ")}</Badge>
+                    </div>
+                    <small>{guidanceForSection(section.key)}</small>
+                    <textarea
+                      rows={section.key === "implementation" ? 7 : 5}
+                      value={section.content}
+                      onChange={(event) => localUpdateSection(section.key, event.target.value)}
+                      onBlur={(event) => commitSection({ ...section, content: event.target.value })}
+                    />
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <aside className="agent-review-panel">
+            <section className="section">
+              <div className="section-head">
+                <div>
+                  <span className="eyebrow">Evidence</span>
+                  <h2>Why the AI Agent chose this</h2>
+                </div>
+              </div>
+              {envelope.sources.map((source) => (
+                <article className="source-line" key={source.id}>
+                  <span>{source.kind}</span>
+                  <strong>{source.title}</strong>
+                  <p>{source.snippet}</p>
+                </article>
+              ))}
+            </section>
+
+            <section className="section">
+              <div className="section-head">
+                <div>
+                  <span className="eyebrow">Validation</span>
+                  <h2>{validation.valid ? "No blockers" : "Approval blocked"}</h2>
+                </div>
+              </div>
+              <ReviewList items={validation.blocking || []} empty="No blocking validation issues." />
+              <div className="validation-box">
+                <strong>Warnings</strong>
+                <ReviewList items={validation.warnings || []} empty="No warnings." />
+              </div>
+              <Button variant="dark" icon={Check} disabled={!validation.valid || working || draft.approval_status === "submitted"} onClick={approve}>
+                {draft.approval_status === "submitted" ? "Submitted" : "Create Freshdesk ticket"}
+              </Button>
+            </section>
+
+            <section className="section">
+              <div className="section-head">
+                <div>
+                  <span className="eyebrow">Immutable revisions</span>
+                  <h2>What changed</h2>
+                </div>
+              </div>
+              {events.length ? events.slice().reverse().map((event, index) => (
+                <article className="revision-line" key={`${event.field_key}-${event.timestamp}-${index}`}>
+                  <strong>{event.field_key.replaceAll("_", " ")}</strong>
+                  <span>Changed from {event.old_value || "Empty"} to {event.new_value || "Empty"}</span>
+                  <small>{event.edited_by} at {formatDate(event.timestamp)}</small>
+                </article>
+              )) : <Empty title="No user edits yet" text="Edits will be recorded here and sent back to the AI agent after approval." />}
+            </section>
+
+            {draft.feedback_payload && (
+              <section className="section">
+                <div className="section-head">
+                  <div>
+                    <span className="eyebrow">AI Agent feedback event</span>
+                    <h2>{draft.ticket_id}</h2>
+                  </div>
+                </div>
+                <pre className="feedback-json">{JSON.stringify(draft.feedback_payload, null, 2)}</pre>
+              </section>
+            )}
+          </aside>
+        </div>
+      )}
+
+      {tab === "bulk" && <AgentBulkPreview />}
+      {tab === "api" && <AgentApiPanel metadata={metadata} />}
+    </div>
+  );
+}
+
+function AgentBulkPreview() {
+  const rows = [
+    ["User 1", "Laptop request", "Draft ready"],
+    ["User 2", "Freshdesk access", "Needs manager context"],
+    ["User 3", "Mailbox permissions", "Draft ready"],
+    ["User 4", "VPN access", "Needs start date"],
+    ["User 5", "Shared drive access", "Draft ready"],
+  ];
+  return (
+    <section className="section agent-bulk">
+      <div className="section-head">
+        <div>
+          <span className="eyebrow">Future bulk_create mode</span>
+          <h2>One template, many reviewable tickets</h2>
+        </div>
+        <Badge>Lightweight preview</Badge>
+      </div>
+      <p className="section-copy">An AI agent can prepare onboarding-style batches as one template plus multiple rows. Each generated row still becomes an approval-ready draft before Freshdesk creation.</p>
+      <div className="bulk-template-grid">
+        <article>
+          <span>Template</span>
+          <strong>New user onboarding task</strong>
+          <p>Shared defaults: A24 Support, Kwabiwe Sibanda, L3 Engineer, Minor business impact.</p>
+        </article>
+        <article>
+          <span>Rows</span>
+          <strong>5 tickets</strong>
+          <p>Each row inherits the template and records its own missing information.</p>
+        </article>
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead><tr><th>Row</th><th>Ticket focus</th><th>Gateway state</th></tr></thead>
+          <tbody>
+            {rows.map(([user, focus, state]) => <tr key={user}><td>{user}</td><td>{focus}</td><td>{state}</td></tr>)}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function AgentApiPanel({ metadata }) {
+  const endpoints = [
+    "GET /api/v1/metadata",
+    "POST /api/v1/drafts",
+    "GET /api/v1/drafts/{id}",
+    "PATCH /api/v1/drafts/{id}",
+    "POST /api/v1/drafts/{id}/validate",
+    "POST /api/v1/drafts/{id}/approve-and-submit",
+    "POST /api/v1/feedback/approved-drafts",
+  ];
+  return (
+    <section className="section">
+      <div className="section-head">
+        <div>
+          <span className="eyebrow">Machine-friendly local handoff</span>
+          <h2>AI agents submit drafts, the gateway submits tickets</h2>
+        </div>
+        <Badge>{metadata?.schema_version}</Badge>
+      </div>
+      <p className="section-copy">The gateway accepts structured drafts, validates against cached Freshdesk metadata, and returns an explicit feedback event after approval.</p>
+      <div className="api-route-grid">
+        {endpoints.map((endpoint) => <code key={endpoint}>{endpoint}</code>)}
+      </div>
+      <div className="validation-box">
+        <strong>Freshdesk form binding</strong>
+        <span>{metadata?.freshdesk_form_binding?.message}</span>
+      </div>
+    </section>
   );
 }
 
@@ -1147,7 +1840,7 @@ function AuditPage({ audit, setAudit, notify }) {
             {audit.map((event) => (
               <tr key={event.id}>
                 <td>{formatDate(event.created_at)}</td>
-                <td>{event.action_type.replaceAll("_", " ")}</td>
+                <td>{displayActionType(event.action_type)}</td>
                 <td><Badge>{event.action_mode}</Badge></td>
                 <td>{event.draft_id?.slice(0, 8) || "—"}</td>
                 <td>{event.ticket_id || "—"}</td>
@@ -1327,7 +2020,7 @@ function AuditLine({ event }) {
   return (
     <div className="list-line">
       <Activity size={16} />
-      <div><strong>{event.action_type.replaceAll("_", " ")}</strong><span>{formatDate(event.created_at)}</span></div>
+      <div><strong>{displayActionType(event.action_type)}</strong><span>{formatDate(event.created_at)}</span></div>
       <Badge>{event.action_mode}</Badge>
     </div>
   );

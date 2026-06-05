@@ -108,3 +108,94 @@ class SettingsUpdateRequest(BaseModel):
     max_reads_per_hour: int | None = Field(default=None, ge=1, le=2000)
     max_ticket_creations_per_hour: int | None = Field(default=None, ge=1, le=500)
     draft_expiry_minutes: int | None = Field(default=None, ge=1, le=1440)
+
+
+class AgentSource(BaseModel):
+    id: str
+    kind: str = "note"
+    title: str = ""
+    ref: str = ""
+    snippet: str = ""
+
+
+class AgentAssumption(BaseModel):
+    id: str
+    text: str
+
+
+class AgentMissingInformation(BaseModel):
+    field: str
+    reason: str
+
+
+class AgentTicketField(BaseModel):
+    key: str
+    label: str = ""
+    kind: Literal["short_text", "enum", "entity_ref", "long_text"] = "short_text"
+    value: Any = None
+    display_value: str = ""
+    resolved_id: int | str | None = None
+    required: bool = False
+    status: Literal["confirmed", "inferred", "missing", "conflict", "needs_human_choice", "approved"] = "inferred"
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    why_this_value: str = ""
+    source_ids: list[str] = Field(default_factory=list)
+    assumption_ids: list[str] = Field(default_factory=list)
+    missing_reason: str = ""
+    source: Literal["default", "ai_agent", "freshdesk_metadata", "user_edit"] = "ai_agent"
+
+
+class AgentDescriptionSection(BaseModel):
+    key: str
+    title: str = ""
+    content: str = ""
+    status: Literal["confirmed", "inferred", "missing", "conflict", "needs_human_choice", "approved"] = "inferred"
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    source_ids: list[str] = Field(default_factory=list)
+    assumption_ids: list[str] = Field(default_factory=list)
+
+
+class AgentRevision(BaseModel):
+    number: int = 1
+    created_by: str = "ai_agent"
+    events: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AgentValidation(BaseModel):
+    warnings: list[str] = Field(default_factory=list)
+    blocking: list[str] = Field(default_factory=list)
+    valid: bool = True
+
+
+class AgentDraftEnvelope(BaseModel):
+    schema_version: Literal["a24.freshdesk_draft.v1"]
+    draft_id: str = ""
+    mode: Literal["create", "update", "bulk_create"] = "create"
+    status: Literal["ready_for_review", "ready_with_gaps", "blocked", "conflict"] = "ready_for_review"
+    target_ticket_id: int | str | None = None
+    ticket_fields: list[AgentTicketField] = Field(default_factory=list)
+    description_sections: list[AgentDescriptionSection] = Field(default_factory=list)
+    rendered_description: str = ""
+    sources: list[AgentSource] = Field(default_factory=list)
+    assumptions: list[AgentAssumption] = Field(default_factory=list)
+    missing_information: list[AgentMissingInformation] = Field(default_factory=list)
+    validation: AgentValidation = Field(default_factory=AgentValidation)
+    revision: AgentRevision = Field(default_factory=AgentRevision)
+
+
+class AgentDraftPatch(BaseModel):
+    edited_by: str = "kb"
+    reason: str = ""
+    ticket_fields: list[AgentTicketField] | None = None
+    description_sections: list[AgentDescriptionSection] | None = None
+
+
+class AgentFeedbackRequest(BaseModel):
+    schema_version: str = "a24.freshdesk_feedback.v1"
+    draft_id: str
+    ticket_id: str | int | None = None
+    final_fields: dict[str, Any] = Field(default_factory=dict)
+    freshdesk_payload: dict[str, Any] = Field(default_factory=dict)
+    final_description_sections: dict[str, Any] = Field(default_factory=dict)
+    changed_fields: list[dict[str, Any]] = Field(default_factory=list)
+    final_selected: dict[str, Any] = Field(default_factory=dict)

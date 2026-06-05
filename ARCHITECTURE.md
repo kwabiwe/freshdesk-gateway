@@ -21,7 +21,7 @@ Tailnet device
     -> loopback-only FastAPI REST API
 ```
 
-The browser never receives the Freshdesk API key. Every future interface, including an optional OpenClaw adapter, should use the same local REST API and safety controls.
+The browser never receives the Freshdesk API key. Every future interface, including an optional AI Agent adapter, should use the same local REST API and safety controls.
 
 ## Backend Modules
 

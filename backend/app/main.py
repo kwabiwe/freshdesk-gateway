@@ -29,7 +29,11 @@ from .models import (
     SettingsUpdateRequest,
     SummariseRequest,
     TicketDraftRequest,
+    AgentDraftEnvelope,
+    AgentDraftPatch,
+    AgentFeedbackRequest,
 )
+from .agent_draft_store import AgentDraftStore
 from .local_llm_client import LocalLLMClient
 from .rate_limit import RateLimiter
 from .related_tickets import RelatedTicketsService
@@ -62,6 +66,7 @@ class Services:
         self.schema = SchemaService(self.freshdesk, self.schema_cache, self.audit)
         self.defaults = TicketDefaultsService(self.schema_cache, settings_provider)
         self.assistant = DraftAssistantService(self.local_llm, self.schema_cache, self.defaults)
+        self.agent = AgentDraftStore(self.db, self.schema_cache, self.audit, self.freshdesk, self.validator, self.defaults)
         self.skill_registry = SkillRegistry()
         self.change_skill = self.skill_registry.get(base_settings.change_drafting_skill)
         self.changes = ChangeService(self.local_llm, self.schema_cache, self.defaults, self.change_skill)
@@ -155,6 +160,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         services.emergency.require_clear()
         overview = services.schema_cache.overview()
         return {**overview, "required_fields": services.schema_cache.required_ticket_fields()}
+
+    @app.get("/api/v1/metadata")
+    def agent_metadata():
+        services.emergency.require_clear()
+        return services.agent.metadata()
+
+    @app.post("/api/v1/drafts")
+    def agent_create_draft(body: AgentDraftEnvelope):
+        services.emergency.require_clear()
+        return services.agent.create(body)
+
+    @app.get("/api/v1/drafts/{draft_id}")
+    def agent_get_draft(draft_id: str):
+        services.emergency.require_clear()
+        return services.agent.get(draft_id)
+
+    @app.patch("/api/v1/drafts/{draft_id}")
+    def agent_update_draft(draft_id: str, body: AgentDraftPatch):
+        services.emergency.require_clear()
+        return services.agent.update(draft_id, body)
+
+    @app.post("/api/v1/drafts/{draft_id}/validate")
+    def agent_validate_draft(draft_id: str):
+        services.emergency.require_clear()
+        return services.agent.validate(draft_id)
+
+    @app.post("/api/v1/drafts/{draft_id}/approve-and-submit")
+    def agent_approve_and_submit(draft_id: str):
+        services.emergency.require_clear()
+        return services.agent.approve_and_submit(draft_id)
+
+    @app.post("/api/v1/feedback/approved-drafts")
+    def agent_feedback(body: AgentFeedbackRequest):
+        services.emergency.require_clear()
+        return services.agent.record_feedback(body)
 
     @app.get("/api/freshdesk/groups")
     def freshdesk_groups():

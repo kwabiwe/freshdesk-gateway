@@ -819,3 +819,107 @@ def test_schema_sync_is_blocked_by_emergency_stop(settings: Settings):
     assert client.post("/api/admin/emergency-stop", json={"confirmation": "STOP"}).status_code == 200
     response = client.post("/api/freshdesk/sync-schema")
     assert response.status_code == 423
+
+
+def agent_payload() -> dict[str, object]:
+    return {
+        "schema_version": "a24.freshdesk_draft.v1",
+        "mode": "create",
+        "status": "ready_for_review",
+        "ticket_fields": [
+            {"key": "subject", "kind": "short_text", "display_value": "Mailbox routing change", "required": True, "status": "confirmed", "confidence": 0.9},
+            {"key": "group", "kind": "entity_ref", "display_value": "L3 Engineer", "resolved_id": 999, "required": True, "status": "inferred", "confidence": 0.8},
+            {"key": "agent", "kind": "entity_ref", "display_value": "Kwabiwe Sibanda", "required": True, "status": "confirmed"},
+            {"key": "form", "kind": "enum", "display_value": "Change Request", "required": True, "status": "inferred"},
+            {"key": "ticket_type", "kind": "enum", "display_value": "Change", "required": True, "status": "inferred"},
+            {"key": "status", "kind": "enum", "display_value": "Open", "required": True, "status": "confirmed"},
+            {"key": "business_impact", "kind": "enum", "display_value": "Minor", "required": True, "status": "confirmed"},
+            {"key": "priority", "kind": "enum", "display_value": "Low", "required": True, "status": "confirmed"},
+        ],
+        "description_sections": [
+            {"key": "scope", "title": "Scope of the change", "content": "Update mailbox routing only.", "status": "confirmed"},
+            {"key": "implementation", "title": "Implementation steps", "content": "Update routing rule and test delivery.", "status": "confirmed"},
+            {"key": "rollback", "title": "Rollback plan", "content": "Restore the previous mailbox routing rule.", "status": "confirmed"},
+            {"key": "verification", "title": "Test or verification steps", "content": "Send a controlled test message.", "status": "confirmed"},
+            {"key": "config_items", "title": "Configuration Items", "content": "Shared mailbox routing rule.", "status": "confirmed"},
+            {"key": "requester_context", "title": "Requester context", "content": "Sample email context.", "status": "confirmed"},
+            {"key": "assumptions_missing", "title": "Assumptions or missing information", "content": "No known gaps.", "status": "confirmed"},
+        ],
+        "sources": [{"id": "src_email_1", "kind": "email", "title": "Sample email context", "snippet": "Mailbox routing request."}],
+        "assumptions": [{"id": "asm_1", "text": "Business impact assumed Minor."}],
+        "missing_information": [],
+        "validation": {"warnings": [], "blocking": [], "valid": True},
+        "revision": {"number": 1, "created_by": "ai_agent", "events": []},
+    }
+
+
+def test_agent_draft_accepts_normalizes_and_resolves_metadata(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    services.schema_cache.put("groups", [{"id": 9, "name": "L3 Engineering"}])
+    services.schema_cache.put("agents", [{"id": 8, "contact": {"name": "Kwabiwe Sibanda"}}])
+    services.schema_cache.put("ticket_forms", [{"id": 4, "title": "Change Request"}])
+    services.schema_cache.put(
+        "ticket_fields",
+        [
+            {"name": "cf_business_impact", "label": "Business Impact", "choices": ["Minor", "Major"]},
+            {"name": "cf_ticket_type", "label": "Ticket Type", "choices": ["Change", "Incident"]},
+        ],
+    )
+    response = TestClient(app).post("/api/v1/drafts", json=agent_payload())
+    assert response.status_code == 200
+    body = response.json()
+    fields = {field["key"]: field for field in body["envelope"]["ticket_fields"]}
+    assert fields["group"]["resolved_id"] == 9
+    assert fields["agent"]["resolved_id"] == 8
+    assert fields["form"]["resolved_id"] == 4
+    assert fields["business_impact"]["display_value"] == "Minor"
+    assert body["validation_result"]["valid"] is True
+    assert "form binding" in body["validation_result"]["warnings"][0].lower()
+
+
+def test_agent_rejects_unsupported_schema_version(settings: Settings):
+    payload = {**agent_payload(), "schema_version": "a24.freshdesk_draft.v9"}
+    response = TestClient(create_app(settings)).post("/api/v1/drafts", json=payload)
+    assert response.status_code == 422
+
+
+def test_agent_patch_tracks_revision_and_feedback_payload(settings: Settings):
+    app = create_app(settings)
+    sent: list[dict[str, object]] = []
+    app.state.services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 1234}
+    client = TestClient(app)
+    created = client.post("/api/v1/drafts", json=agent_payload()).json()
+    draft_id = created["draft_id"]
+    subject = next(field for field in created["envelope"]["ticket_fields"] if field["key"] == "subject")
+    subject["display_value"] = "Mailbox routing change - reviewed"
+    subject["value"] = "Mailbox routing change - reviewed"
+    response = client.patch(
+        f"/api/v1/drafts/{draft_id}",
+        json={"edited_by": "kb", "ticket_fields": [subject], "reason": "Tightened subject"},
+    )
+    assert response.status_code == 200
+    updated = response.json()
+    assert updated["revision_events"][0]["field_key"] == "subject"
+    assert updated["revision_events"][0]["old_value"] == "Mailbox routing change"
+    assert updated["revision_events"][0]["new_value"] == "Mailbox routing change - reviewed"
+
+    response = client.post(f"/api/v1/drafts/{draft_id}/approve-and-submit")
+    assert response.status_code == 200
+    submitted = response.json()
+    assert submitted["approval_status"] == "submitted"
+    assert submitted["ticket_id"] == "1234"
+    assert sent[0]["subject"] == "Mailbox routing change - reviewed"
+    assert sent[0]["type"] == "Change"
+    assert sent[0]["priority"] == 1
+    assert sent[0]["status"] == 2
+    assert submitted["feedback_payload"]["changed_fields"][0]["field_key"] == "subject"
+    assert submitted["feedback_payload"]["final_fields"]["subject"] == "Mailbox routing change - reviewed"
+    assert submitted["feedback_payload"]["freshdesk_payload"]["subject"] == "Mailbox routing change - reviewed"
+
+
+def test_agent_routes_respect_emergency_stop(settings: Settings):
+    app = create_app(settings)
+    client = TestClient(app)
+    assert client.post("/api/admin/emergency-stop", json={"confirmation": "STOP"}).status_code == 200
+    assert client.get("/api/v1/metadata").status_code == 423

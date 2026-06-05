@@ -10,7 +10,7 @@ The browser UI talks only to the local FastAPI backend. The backend holds your p
 
 ## What It Does Not Do
 
-The MVP does not delete, close, merge, bulk-update, or reassign existing tickets. It does not send public replies. It does not add automation notes, AI markers, tags, or other visible Freshdesk metadata. It does not need OpenClaw or cloud AI.
+The MVP does not delete, close, merge, bulk-update, or reassign existing tickets. It does not send public replies. It does not add automation notes, AI markers, tags, or other visible Freshdesk metadata. It does not need a specific AI agent or cloud AI.
 
 ## Install
 
@@ -242,9 +242,9 @@ Open **Related tickets** and run the constrained search. The gateway uses `MY_NA
 - `423`: emergency stop is active. Resume only after checking why it was activated.
 - Validation failure: sync the schema, complete the listed required fields, and remove suspected secrets.
 
-## Optional OpenClaw Integration Later
+## Optional AI Agent Integration
 
-OpenClaw is not required. A later local-only adapter can call the existing REST API at `http://127.0.0.1:8787/api`, or the private Tailscale Serve URL when the adapter runs on another Tailnet device.
+The gateway is provider-neutral. Any local AI agent can call the existing REST API at `http://127.0.0.1:8787/api`, or the private Tailscale Serve URL when the adapter runs on another Tailnet device.
 
 Safe endpoint families already exist for health, stop/resume, schema sync, directory lookups, drafting, validation, approval, selected batch creation, related-ticket listing, local-model summarisation, and audit viewing.
 

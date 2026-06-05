@@ -55,6 +55,17 @@ CREATE TABLE IF NOT EXISTS drafts (
     api_result TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_drafts_batch_id ON drafts(batch_id);
+CREATE TABLE IF NOT EXISTS agent_drafts (
+    draft_id TEXT PRIMARY KEY,
+    envelope TEXT NOT NULL,
+    validation_result TEXT NOT NULL,
+    revision_events TEXT NOT NULL,
+    approval_status TEXT NOT NULL,
+    ticket_id TEXT,
+    feedback_payload TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
