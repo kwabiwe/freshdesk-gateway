@@ -557,6 +557,8 @@ function guidanceForSection(key) {
 function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify }) {
   const [tab, setTab] = useState("review");
   const [working, setWorking] = useState(false);
+  const [agentToken, setAgentToken] = useState(() => window.localStorage.getItem("agent_api_token") || "");
+  const [authError, setAuthError] = useState("");
   const validation = draft?.validation_result || draft?.envelope?.validation || { valid: false, blocking: [] };
   const envelope = draft?.envelope;
   const events = draft?.revision_events || envelope?.revision?.events || [];
@@ -564,11 +566,21 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
   const fieldCount = envelope?.ticket_fields?.length || 0;
   const readyCount = envelope?.ticket_fields?.filter((field) => !["missing", "needs_human_choice", "conflict"].includes(field.status)).length || 0;
 
+  const saveAgentToken = useCallback(() => {
+    if (agentToken.trim()) window.localStorage.setItem("agent_api_token", agentToken.trim());
+    else window.localStorage.removeItem("agent_api_token");
+    setAuthError("");
+    setMetadata(null);
+    setDraft(null);
+    notify("success", agentToken.trim() ? "Agent API token saved in this browser." : "Agent API token removed from this browser.");
+  }, [agentToken, notify, setDraft, setMetadata]);
+
   const loadReviewWorkspace = useCallback(async ({ preferSaved = true } = {}) => {
     setWorking(true);
     try {
       const meta = await request("/v1/metadata");
       setMetadata(meta);
+      setAuthError("");
       const savedId = preferSaved ? window.localStorage.getItem("ai_agent_review_draft_id") : "";
       if (savedId) {
         try {
@@ -589,7 +601,12 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
         setDraft(null);
       }
     } catch (error) {
-      notify("error", error.message);
+      if (error.message.includes("Agent API token") || error.message.includes("401")) {
+        setAuthError(error.message);
+        setMetadata(null);
+      } else {
+        notify("error", error.message);
+      }
     } finally {
       setWorking(false);
     }
@@ -703,10 +720,35 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
         <div className="section-head">
           <div>
             <span className="eyebrow">AI Agent draft handoff</span>
-            <h2>Loading review workspace</h2>
+            <h2>{authError ? "Agent API token required" : "Loading review workspace"}</h2>
           </div>
         </div>
-        <Empty title="Loading gateway metadata" text="The review page is connecting to the local Freshdesk gateway." />
+        {authError ? (
+          <>
+            <p className="section-copy">The gateway inbox is protected. Paste the same `AGENT_API_TOKEN` from the MacBook gateway `.env`; it is saved only in this browser's local storage.</p>
+            <div className="settings-grid">
+              <Field label="Agent API token">
+                <input type="password" value={agentToken} onChange={(event) => setAgentToken(event.target.value)} />
+              </Field>
+              <div className="field">
+                <span className="field-label">Load gateway inbox</span>
+                <Button
+                  type="button"
+                  variant="dark"
+                  icon={ShieldCheck}
+                  onClick={() => {
+                    saveAgentToken();
+                    window.setTimeout(() => loadReviewWorkspace({ preferSaved: true }), 0);
+                  }}
+                  disabled={working}
+                >
+                  Save token and retry
+                </Button>
+              </div>
+            </div>
+            <Empty title={authError} text="Without this browser token, the AI Agent review inbox cannot read submitted OpenClaw drafts." />
+          </>
+        ) : <Empty title="Loading gateway metadata" text="The review page is connecting to the local Freshdesk gateway." />}
       </section>
     );
   }
@@ -717,8 +759,8 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
         <section className="agent-hero">
           <div>
             <span className="eyebrow">A24 AI Agent to Freshdesk</span>
-            <h2>No AI Agent drafts are waiting for review</h2>
-            <p>OpenClaw needs to submit a structured draft to the gateway before this page has anything to review. The gateway no longer creates fake example data.</p>
+            <h2>Gateway inbox is empty</h2>
+            <p>This is the gateway inbox for OpenClaw-submitted drafts. OpenClaw writes drafts to <code>POST /api/v1/drafts</code>; the gateway stores them in the local MacBook SQLite `agent_drafts` table and shows them here for approval.</p>
           </div>
           <div className="agent-hero-actions">
             <Badge>Waiting for draft</Badge>
@@ -745,10 +787,11 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
       <section className="agent-hero">
         <div>
           <span className="eyebrow">A24 AI Agent to Freshdesk</span>
-          <h2>Review a structured regular Freshdesk ticket before anything is submitted</h2>
-          <p>AI Agent drafts from notes, email, Trello, and other connected context. The gateway owns validation, diffs, approval, and the final Freshdesk handoff.</p>
+          <h2>Gateway inbox: review this OpenClaw draft before anything is submitted</h2>
+          <p>OpenClaw submitted this draft envelope into the MacBook gateway. The gateway owns validation, diffs, approval, and the final Freshdesk handoff.</p>
         </div>
         <div className="agent-hero-actions">
+          <Badge>{draft.draft_id}</Badge>
           <Badge tone={validation.valid ? "good" : "alert"}>{validation.valid ? "Ready for approval" : "Needs review"}</Badge>
           <Button type="button" icon={RefreshCw} variant="quiet" onClick={() => loadReviewWorkspace({ preferSaved: false })} disabled={working}>Refresh drafts</Button>
         </div>
