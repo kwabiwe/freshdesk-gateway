@@ -204,6 +204,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         services.emergency.require_clear()
         return services.agent.update(draft_id, body)
 
+    @app.delete("/api/v1/drafts/{draft_id}")
+    def agent_delete_draft(draft_id: str, request: Request):
+        require_agent_api_auth(request)
+        services.emergency.require_clear()
+        return services.agent.delete(draft_id)
+
     @app.post("/api/v1/drafts/{draft_id}/validate")
     def agent_validate_draft(draft_id: str, request: Request):
         require_agent_api_auth(request)

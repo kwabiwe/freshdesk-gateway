@@ -888,7 +888,9 @@ def test_agent_lists_submitted_drafts_for_review_inbox(settings: Settings):
     assert response.status_code == 200
     listed_ids = {draft["draft_id"] for draft in response.json()}
     assert {first["draft_id"], second["draft_id"]} <= listed_ids
-    assert len(client.get("/api/v1/drafts?limit=1").json()) == 1
+    latest = client.get("/api/v1/drafts?limit=1").json()
+    assert len(latest) == 1
+    assert latest[0]["draft_id"] == second["draft_id"]
 
 
 def test_agent_rejects_unsupported_schema_version(settings: Settings):
@@ -929,6 +931,18 @@ def test_agent_patch_tracks_revision_and_feedback_payload(settings: Settings):
     assert submitted["feedback_payload"]["changed_fields"][0]["field_key"] == "subject"
     assert submitted["feedback_payload"]["final_fields"]["subject"] == "Mailbox routing change - reviewed"
     assert submitted["feedback_payload"]["freshdesk_payload"]["subject"] == "Mailbox routing change - reviewed"
+
+
+def test_agent_delete_removes_unsubmitted_draft_from_review_inbox(settings: Settings):
+    client = TestClient(create_app(settings))
+    created = client.post("/api/v1/drafts", json=agent_payload()).json()
+    draft_id = created["draft_id"]
+
+    response = client.delete(f"/api/v1/drafts/{draft_id}")
+
+    assert response.status_code == 200
+    assert response.json() == {"draft_id": draft_id, "deleted": True}
+    assert client.get(f"/api/v1/drafts/{draft_id}").status_code == 404
 
 
 def test_agent_submit_requires_exact_confirmation(settings: Settings):

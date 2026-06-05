@@ -155,7 +155,7 @@ class AgentDraftStore:
     def list(self, limit: int = 100) -> list[dict[str, Any]]:
         with self.db.connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM agent_drafts ORDER BY updated_at DESC, created_at DESC LIMIT ?",
+                "SELECT * FROM agent_drafts ORDER BY created_at DESC, updated_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [self._row_response(row) for row in rows]
@@ -233,6 +233,15 @@ class AgentDraftStore:
             validation_result=envelope.validation.model_dump(),
         )
         return self.get(draft_id)
+
+    def delete(self, draft_id: str) -> dict[str, Any]:
+        current = self.get(draft_id)
+        if current["approval_status"] == "submitted":
+            raise HTTPException(status_code=409, detail="Submitted AI agent drafts cannot be removed from the review inbox.")
+        with self.db.connect() as conn:
+            conn.execute("DELETE FROM agent_drafts WHERE draft_id = ?", (draft_id,))
+        self.audit.record("agent_draft_deleted", "local", draft_id=draft_id)
+        return {"draft_id": draft_id, "deleted": True}
 
     def validate(self, draft_id: str) -> dict[str, Any]:
         current = self.get(draft_id)

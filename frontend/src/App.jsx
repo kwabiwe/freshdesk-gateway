@@ -542,6 +542,18 @@ function fieldValue(field) {
   return field?.display_value || field?.value || "";
 }
 
+function draftSubject(draft) {
+  return fieldValue(draft?.envelope?.ticket_fields?.find((field) => field.key === "subject")) || draft?.draft_id || "Untitled AI Agent draft";
+}
+
+function sortAgentDrafts(drafts) {
+  return [...drafts].sort((a, b) => {
+    const createdDelta = Date.parse(b.created_at || 0) - Date.parse(a.created_at || 0);
+    if (createdDelta) return createdDelta;
+    return Date.parse(b.updated_at || 0) - Date.parse(a.updated_at || 0);
+  });
+}
+
 function guidanceForSection(key) {
   return {
     scope: "Define what changes and what stays out of scope.",
@@ -559,6 +571,7 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
   const [working, setWorking] = useState(false);
   const [agentToken, setAgentToken] = useState(() => window.localStorage.getItem("agent_api_token") || "");
   const [authError, setAuthError] = useState("");
+  const [agentDrafts, setAgentDrafts] = useState([]);
   const validation = draft?.validation_result || draft?.envelope?.validation || { valid: false, blocking: [] };
   const envelope = draft?.envelope;
   const events = draft?.revision_events || envelope?.revision?.events || [];
@@ -581,21 +594,26 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
       const meta = await request("/v1/metadata");
       setMetadata(meta);
       setAuthError("");
+      const items = await request("/v1/drafts?limit=50");
+      const sortedItems = sortAgentDrafts(Array.isArray(items) ? items : []);
+      setAgentDrafts(sortedItems);
       const savedId = preferSaved ? window.localStorage.getItem("ai_agent_review_draft_id") : "";
+      const newest = sortedItems[0] || null;
       if (savedId) {
-        try {
-          const saved = await request(`/v1/drafts/${savedId}`);
+        const saved = sortedItems.find((item) => item.draft_id === savedId);
+        const savedCreated = Date.parse(saved?.created_at || 0);
+        const newerAwaiting = sortedItems.some((item) =>
+          item.approval_status === "awaiting_approval" && Date.parse(item.created_at || 0) > savedCreated
+        );
+        if (saved && !newerAwaiting) {
           setDraft(saved);
           return;
-        } catch {
-          window.localStorage.removeItem("ai_agent_review_draft_id");
         }
+        window.localStorage.removeItem("ai_agent_review_draft_id");
       }
-      const items = await request("/v1/drafts?limit=1");
-      const latest = Array.isArray(items) ? items[0] : null;
-      if (latest) {
-        window.localStorage.setItem("ai_agent_review_draft_id", latest.draft_id);
-        setDraft(latest);
+      if (newest) {
+        window.localStorage.setItem("ai_agent_review_draft_id", newest.draft_id);
+        setDraft(newest);
       } else {
         window.localStorage.removeItem("ai_agent_review_draft_id");
         setDraft(null);
@@ -615,6 +633,36 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
   useEffect(() => {
     if (!draft && !metadata) loadReviewWorkspace();
   }, [draft, loadReviewWorkspace, metadata]);
+
+  const selectAgentDraft = async (draftId) => {
+    if (!draftId) return;
+    setWorking(true);
+    try {
+      const selected = await request(`/v1/drafts/${draftId}`);
+      window.localStorage.setItem("ai_agent_review_draft_id", selected.draft_id);
+      setDraft(selected);
+    } catch (error) {
+      notify("error", error.message);
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const removeAgentDraft = async () => {
+    if (!draft?.draft_id) return;
+    if (!window.confirm(`Remove ${draft.draft_id} from the local gateway inbox? This does not touch Freshdesk.`)) return;
+    setWorking(true);
+    try {
+      await request(`/v1/drafts/${draft.draft_id}`, { method: "DELETE" });
+      window.localStorage.removeItem("ai_agent_review_draft_id");
+      notify("success", "AI Agent draft removed from the local inbox.");
+      await loadReviewWorkspace({ preferSaved: false });
+    } catch (error) {
+      notify("error", error.message);
+    } finally {
+      setWorking(false);
+    }
+  };
 
   const localUpdateField = (key, value) => {
     setDraft((current) => {
@@ -791,9 +839,24 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
           <p>OpenClaw submitted this draft envelope into the MacBook gateway. The gateway owns validation, diffs, approval, and the final Freshdesk handoff.</p>
         </div>
         <div className="agent-hero-actions">
+          {agentDrafts.length > 1 && (
+            <label className="agent-draft-select">
+              <span>Current inbox draft</span>
+              <select value={draft.draft_id} onChange={(event) => selectAgentDraft(event.target.value)} disabled={working}>
+                {agentDrafts.map((item) => (
+                  <option value={item.draft_id} key={item.draft_id}>
+                    {draftSubject(item)} - {formatDate(item.created_at)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <Badge>{draft.draft_id}</Badge>
           <Badge tone={validation.valid ? "good" : "alert"}>{validation.valid ? "Ready for approval" : "Needs review"}</Badge>
           <Button type="button" icon={RefreshCw} variant="quiet" onClick={() => loadReviewWorkspace({ preferSaved: false })} disabled={working}>Refresh drafts</Button>
+          {draft.approval_status !== "submitted" && (
+            <Button type="button" icon={X} variant="danger" onClick={removeAgentDraft} disabled={working}>Remove from inbox</Button>
+          )}
         </div>
       </section>
 
