@@ -542,6 +542,10 @@ function fieldValue(field) {
   return field?.display_value || field?.value || "";
 }
 
+function displayToken(value, fallback = "unknown") {
+  return String(value || fallback).replaceAll("_", " ");
+}
+
 function draftSubject(draft) {
   return fieldValue(draft?.envelope?.ticket_fields?.find((field) => field.key === "subject")) || draft?.draft_id || "Untitled AI Agent draft";
 }
@@ -574,10 +578,14 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
   const [agentDrafts, setAgentDrafts] = useState([]);
   const validation = draft?.validation_result || draft?.envelope?.validation || { valid: false, blocking: [] };
   const envelope = draft?.envelope;
-  const events = draft?.revision_events || envelope?.revision?.events || [];
+  const ticketFields = Array.isArray(envelope?.ticket_fields) ? envelope.ticket_fields : [];
+  const descriptionSections = Array.isArray(envelope?.description_sections) ? envelope.description_sections : [];
+  const sources = Array.isArray(envelope?.sources) ? envelope.sources : [];
+  const rawEvents = draft?.revision_events || envelope?.revision?.events || [];
+  const events = Array.isArray(rawEvents) ? rawEvents : [];
   const changedKeys = new Set(events.map((event) => event.field_key));
-  const fieldCount = envelope?.ticket_fields?.length || 0;
-  const readyCount = envelope?.ticket_fields?.filter((field) => !["missing", "needs_human_choice", "conflict"].includes(field.status)).length || 0;
+  const fieldCount = ticketFields.length;
+  const readyCount = ticketFields.filter((field) => !["missing", "needs_human_choice", "conflict"].includes(field.status)).length;
 
   const saveAgentToken = useCallback(() => {
     if (agentToken.trim()) window.localStorage.setItem("agent_api_token", agentToken.trim());
@@ -666,7 +674,8 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
 
   const localUpdateField = (key, value) => {
     setDraft((current) => {
-      const nextFields = current.envelope.ticket_fields.map((field) =>
+      const currentFields = Array.isArray(current.envelope.ticket_fields) ? current.envelope.ticket_fields : [];
+      const nextFields = currentFields.map((field) =>
         field.key === key ? { ...field, value, display_value: value, source: "user_edit" } : field
       );
       return { ...current, envelope: { ...current.envelope, ticket_fields: nextFields } };
@@ -687,7 +696,8 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
 
   const localUpdateSection = (key, content) => {
     setDraft((current) => {
-      const nextSections = current.envelope.description_sections.map((section) =>
+      const currentSections = Array.isArray(current.envelope.description_sections) ? current.envelope.description_sections : [];
+      const nextSections = currentSections.map((section) =>
         section.key === key ? { ...section, content, status: content.trim() ? "confirmed" : "missing" } : section
       );
       return { ...current, envelope: { ...current.envelope, description_sections: nextSections } };
@@ -734,7 +744,7 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
       title: mode === "update" ? "Update this Freshdesk ticket?" : mode === "bulk_create" ? "Create these Freshdesk tickets?" : "Create this Freshdesk ticket?",
       copy: mode === "bulk_create"
         ? `Review complete. This submits ${envelope.bulk_items?.length || 0} generated tickets to Freshdesk.`
-        : `Review complete. This sends the exact approved AI Agent draft to Freshdesk: ${fieldValue(envelope.ticket_fields.find((field) => field.key === "subject")) || "Untitled ticket"}`,
+        : `Review complete. This sends the exact approved AI Agent draft to Freshdesk: ${fieldValue(ticketFields.find((field) => field.key === "subject")) || "Untitled ticket"}`,
       confirmWord,
       actionLabel: mode === "update" ? "Update ticket" : mode === "bulk_create" ? "Create tickets" : "Create ticket",
       onConfirm: submitApprovedDraft,
@@ -879,7 +889,7 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
                 <Button type="button" variant="quiet" icon={FileClock} onClick={saveReview} disabled={working}>Save review changes</Button>
               </div>
             </div>
-            {envelope.ticket_fields.map((field, index) => {
+            {ticketFields.map((field, index) => {
               const value = fieldValue(field);
               const options = optionRecords(metadata, field.key, value);
               const original = events.find((event) => event.field_key === field.key)?.old_value || value;
@@ -889,7 +899,7 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
                   <div className="ledger-field-main">
                     <div className="ledger-field-title">
                       <strong>{field.label}</strong>
-                      <Badge tone={["missing", "needs_human_choice", "conflict"].includes(field.status) ? "alert" : "neutral"}>{field.status.replaceAll("_", " ")}</Badge>
+                      <Badge tone={["missing", "needs_human_choice", "conflict"].includes(field.status) ? "alert" : "neutral"}>{displayToken(field.status, "unknown")}</Badge>
                     </div>
                     <div className="ledger-edit">
                       {options.length > 1 ? (
@@ -930,18 +940,18 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
                   <h2>Long sections with guidance</h2>
                 </div>
               </div>
-              {envelope.description_sections.map((section, index) => (
-                <article className={cls("section-editor", !section.content.trim() && "section-editor-missing")} key={section.key}>
+              {descriptionSections.map((section, index) => (
+                <article className={cls("section-editor", !String(section.content || "").trim() && "section-editor-missing")} key={section.key}>
                   <div className="ledger-number">{String(index + 1).padStart(2, "0")}</div>
                   <div>
                     <div className="ledger-field-title">
                       <strong>{section.title}</strong>
-                      <Badge tone={!section.content.trim() ? "alert" : "neutral"}>{section.status.replaceAll("_", " ")}</Badge>
+                      <Badge tone={!String(section.content || "").trim() ? "alert" : "neutral"}>{displayToken(section.status, "unknown")}</Badge>
                     </div>
                     <small>{guidanceForSection(section.key)}</small>
                     <textarea
                       rows={section.key === "implementation" ? 7 : 5}
-                      value={section.content}
+                      value={section.content || ""}
                       onChange={(event) => localUpdateSection(section.key, event.target.value)}
                       onBlur={(event) => commitSection({ ...section, content: event.target.value })}
                     />
@@ -959,7 +969,7 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
                   <h2>Why the AI Agent chose this</h2>
                 </div>
               </div>
-              {envelope.sources.map((source) => (
+              {sources.map((source) => (
                 <article className="source-line" key={source.id}>
                   <span>{source.kind}</span>
                   <strong>{source.title}</strong>
@@ -1000,7 +1010,7 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
               </div>
               {events.length ? events.slice().reverse().map((event, index) => (
                 <article className="revision-line" key={`${event.field_key}-${event.timestamp}-${index}`}>
-                  <strong>{event.field_key.replaceAll("_", " ")}</strong>
+                  <strong>{displayToken(event.field_key, "unknown field")}</strong>
                   <span>Changed from {event.old_value || "Empty"} to {event.new_value || "Empty"}</span>
                   <small>{event.edited_by} at {formatDate(event.timestamp)}</small>
                 </article>
