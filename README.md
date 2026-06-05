@@ -56,4 +56,4 @@ The Vite frontend runs at [http://127.0.0.1:5173](http://127.0.0.1:5173) and pro
 - No Freshdesk note, tag, text, or marker indicates automation or AI use.
 - Tailnet access uses private Tailscale Serve publishing while FastAPI remains bound to loopback.
 
-See [GUIDE.md](GUIDE.md) for configuration, workflows, troubleshooting, and the optional AI Agent interface.
+See [GUIDE.md](GUIDE.md) for configuration, workflows, and troubleshooting. See [docs/openclaw-integration.md](docs/openclaw-integration.md) for the MacBook gateway to OpenClaw/Mac Mini setup.

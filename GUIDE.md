@@ -247,6 +247,8 @@ Open **Related tickets** and run the constrained search. The gateway uses `MY_NA
 
 ## Optional AI Agent Integration
 
+For the full MacBook gateway to OpenClaw/Mac Mini setup, see [docs/openclaw-integration.md](docs/openclaw-integration.md).
+
 The gateway is provider-neutral. Any local AI agent can call the existing REST API at `http://127.0.0.1:8787/api`, or the private Tailscale Serve URL when the adapter runs on another Tailnet device.
 
 Set `AGENT_API_TOKEN` to require a bearer token or `X-Agent-Token` header on `/api/v1` routes. This is intended for the Mac Mini to MacBook gateway path. The browser review page has an **Agent API token** field on the AI Agent API tab for local testing when this is enabled.
