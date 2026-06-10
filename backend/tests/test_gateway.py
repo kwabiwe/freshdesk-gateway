@@ -861,6 +861,37 @@ def test_change_draft_prepare_uses_mapped_title_when_form_subject_is_empty(core,
     assert values["description"] == render_change_html(document)
 
 
+def test_change_draft_from_structured_notes_uses_valid_freshdesk_payload(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    change_schema(services.schema_cache)
+    client = TestClient(app)
+    document_value = {**wise_change_document(), "impact": "Moderate"}
+    document = ChangeDocument.model_validate(document_value)
+
+    response = client.post(
+        "/api/tickets/draft-change",
+        json={"requester_email": "requester@example.com", "change_document": document_value},
+    )
+
+    assert response.status_code == 200
+    draft = response.json()
+    payload = draft["payload"]
+    assert set(payload) <= ALLOWED_TICKET_FIELDS
+    assert "product" not in payload
+    assert payload["subject"] == document.title
+    assert payload["description"] == render_change_html(document)
+    assert payload["custom_fields"]["cf_form2"] == "Change Request"
+    assert payload["custom_fields"]["cf_type"] == "Change"
+    assert payload["custom_fields"]["cf_customer967575"] == "Wise_UK"
+    assert payload["custom_fields"]["cf_change_type"] == "Normal"
+    assert payload["custom_fields"]["cf_change_state"] == "Pending approval"
+    assert payload["custom_fields"]["cf_chg_business_impact"] == "Moderate"
+    assert draft["validation_result"]["invalid_fields"] == []
+    assert draft["validation_result"]["invalid_custom_fields"] == []
+    assert draft["validation_result"]["invalid_custom_field_values"] == []
+
+
 def test_change_draft_approval_blocks_invalid_custom_field_override(settings: Settings):
     app = create_app(settings)
     services = app.state.services
