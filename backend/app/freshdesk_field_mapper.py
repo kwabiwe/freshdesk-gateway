@@ -25,7 +25,22 @@ FIELD_INTENTS = {
     "communication_plan": ["communications required", "communication plan", "communication"],
     "dependencies": ["dependencies", "prerequisites", "dependency"],
 }
-DEFAULT_API_FIELDS = {"subject", "description", "email", "name", "priority", "status", "source", "group_id", "company_id", "type"}
+DEFAULT_API_FIELDS = {
+    "subject",
+    "description",
+    "email",
+    "name",
+    "requester_id",
+    "priority",
+    "status",
+    "source",
+    "group_id",
+    "company_id",
+    "responder_id",
+    "product_id",
+    "type",
+    "tags",
+}
 
 
 def _normalise(value: Any) -> str:

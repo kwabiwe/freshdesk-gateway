@@ -37,6 +37,7 @@ ALLOWED_TICKET_FIELDS = {
     "product_id",
     "type",
     "custom_fields",
+    "tags",
 }
 
 
@@ -69,8 +70,14 @@ class TicketValidator:
         invalid_fields = sorted(key for key in payload if key not in ALLOWED_TICKET_FIELDS)
         invalid_custom_fields: list[str] = []
         invalid_custom_field_values: list[dict[str, Any]] = []
+        invalid_tags: list[Any] = []
         required_fields = self.schema.required_ticket_fields()
         fields_by_name = {str(field.get("name")): field for field in self.schema.ticket_fields()}
+
+        if "tags" in payload:
+            tags = payload.get("tags")
+            if not isinstance(tags, list) or any(not isinstance(tag, str) or self._missing(tag.strip()) for tag in tags):
+                invalid_tags = tags if isinstance(tags, list) else [tags]
 
         for key, value in (payload.get("custom_fields") or {}).items():
             name = str(key)
@@ -142,13 +149,16 @@ class TicketValidator:
             warnings.append(f"Unsupported Freshdesk ticket field(s): {', '.join(invalid_fields)}.")
         if invalid_custom_fields:
             warnings.append(f"Unsupported Freshdesk custom field(s): {', '.join(invalid_custom_fields)}.")
+        if invalid_tags:
+            warnings.append("Freshdesk tags must be an array of non-empty strings.")
 
         return {
-            "valid": not missing and not findings and not invalid_fields and not invalid_custom_fields and not invalid_custom_field_values,
+            "valid": not missing and not findings and not invalid_fields and not invalid_custom_fields and not invalid_custom_field_values and not invalid_tags,
             "missing_fields": missing,
             "invalid_fields": invalid_fields,
             "invalid_custom_fields": sorted(invalid_custom_fields),
             "invalid_custom_field_values": invalid_custom_field_values,
+            "invalid_tags": invalid_tags,
             "sensitive_data_findings": [finding.to_dict() for finding in findings],
             "warnings": warnings,
         }

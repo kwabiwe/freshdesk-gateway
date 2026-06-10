@@ -216,6 +216,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         services.emergency.require_clear()
         return services.agent.validate(draft_id)
 
+    @app.get("/api/v1/drafts/{draft_id}/payload-preview")
+    def agent_payload_preview(draft_id: str, request: Request):
+        require_agent_api_auth(request)
+        services.emergency.require_clear()
+        return services.agent.payload_preview(draft_id)
+
     @app.post("/api/v1/drafts/{draft_id}/approve-and-submit")
     def agent_approve_and_submit(draft_id: str, body: AgentApprovalRequest, request: Request):
         require_agent_api_auth(request)

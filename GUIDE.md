@@ -199,6 +199,12 @@ The local model can suggest editable values but cannot approve them. A ticket is
 
 AI Agent drafts use the same hard approval pattern. Create mode requires `CREATE`, update mode requires `UPDATE`, and bulk-create mode requires `CREATE BULK`.
 
+The AI Agent review page shows a numbered Change Request field ledger plus a separate **Freshdesk Description** editor. The description sections are combined into one Freshdesk `description` payload field; they are not separate custom fields unless the synced Freshdesk schema exposes matching `cf_*` fields.
+
+Before approval, the review panel also shows the exact outgoing Freshdesk payload. The gateway blocks unsupported top-level keys locally. Review-only names such as Product, Contact, Form, Group, Agent, Customer, Business Impact, and Change State must map to an allowed API field, a synced `custom_fields` entry, or be omitted.
+
+Product is treated as an ID-backed Freshdesk entity. The gateway never submits a top-level `product` key. If Product is supported and resolved from metadata, the payload uses `product_id`; if a required Product cannot be resolved to an ID, approval is blocked before Freshdesk is called.
+
 ## Rate Limits
 
 Defaults:
@@ -265,8 +271,9 @@ Minimum OpenClaw-to-gateway flow:
 4. OpenClaw fetches `GET /api/v1/metadata` to see current Freshdesk fields, groups, agents, forms, defaults, and schema-sync state.
 5. OpenClaw submits a versioned draft to `POST /api/v1/drafts`.
 6. You review and edit the draft in the AI Agent review page.
-7. The gateway converts the approved ledger into the Freshdesk create/update/bulk payload and sends it only after the exact typed approval phrase.
-8. OpenClaw can fetch `GET /api/v1/drafts/{id}` after approval to read the `feedback_payload`, including final fields, generated Freshdesk payload, changed fields, and created ticket ID.
+7. OpenClaw or the review UI can fetch `GET /api/v1/drafts/{id}/payload-preview` to inspect the exact Freshdesk payload that approval would send.
+8. The gateway converts the approved ledger into the Freshdesk create/update/bulk payload and sends it only after the exact typed approval phrase.
+9. OpenClaw can fetch `GET /api/v1/drafts/{id}` after approval to read the `feedback_payload`, including final fields, generated Freshdesk payload, changed fields, and created ticket ID.
 
 For command-line testing from OpenClaw or another Tailnet machine:
 

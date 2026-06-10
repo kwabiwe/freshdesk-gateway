@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .freshdesk_payload_builder import coerce_tags
+
 
 CHANGE_SECTIONS = (
     ("Reason for change", "reason_for_change"),
@@ -42,8 +44,11 @@ def clean_ticket_payload(values: dict[str, Any]) -> dict[str, Any]:
     }
     optional_mapping = {
         "requester_name": "name",
+        "requester_id": "requester_id",
         "group_id": "group_id",
         "company_id": "company_id",
+        "responder_id": "responder_id",
+        "product_id": "product_id",
         "type": "type",
     }
     for source, destination in optional_mapping.items():
@@ -53,4 +58,7 @@ def clean_ticket_payload(values: dict[str, Any]) -> dict[str, Any]:
     custom_fields = values.get("custom_fields") or {}
     if custom_fields:
         payload["custom_fields"] = custom_fields
+    tags = coerce_tags(values.get("tags"))
+    if tags:
+        payload["tags"] = tags
     return payload

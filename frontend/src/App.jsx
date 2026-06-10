@@ -525,7 +525,15 @@ function schemaFieldForReviewField(metadata, field) {
     form: ["cf_form2"],
     ticket_type: ["cf_type", "cf_ticket_type"],
     business_impact: ["cf_business_impact723800"],
+    change_type: ["cf_change_type"],
+    requested_by: ["cf_requested_by"],
+    change_owner: ["cf_change_owner"],
+    change_category: ["cf_change_catergory", "cf_change_category"],
+    chg_business_impact: ["cf_chg_business_impact"],
+    change_state: ["cf_change_state"],
+    approval_state: ["cf_approval_state"],
     customer: ["cf_customer967575"],
+    reminder_date: ["cf_reminder_date"],
   }[field?.key] || [];
   for (const name of preferred) {
     const match = (metadata?.ticket_fields || []).find((item) => item.name === name);
@@ -546,6 +554,9 @@ function optionRecords(metadata, field, currentValue) {
   if (key === "priority") return includeCurrent(["Low", "Medium", "High", "Urgent"].map((value) => ({ value, label: value })));
   if (key === "group") return includeCurrent((metadata?.groups || []).map((group) => ({ value: group.name, label: group.name })));
   if (key === "agent") return includeCurrent((metadata?.agents || []).map((agent) => ({ value: agent.contact?.name || agent.name || String(agent.id), label: agent.contact?.name || agent.name || String(agent.id) })));
+  if (Array.isArray(field?.choices) && field.choices.length) {
+    return includeCurrent([blank, ...field.choices.map((value) => ({ value: String(value), label: String(value) }))]);
+  }
   const schemaField = schemaFieldForReviewField(metadata, field);
   const choices = choiceValues(schemaField?.choices).map((value) => ({ value: String(value), label: String(value) }));
   return includeCurrent(choices.length ? [blank, ...choices] : []);
@@ -594,6 +605,7 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
   const ticketFields = Array.isArray(envelope?.ticket_fields) ? envelope.ticket_fields : [];
   const descriptionSections = Array.isArray(envelope?.description_sections) ? envelope.description_sections : [];
   const sources = Array.isArray(envelope?.sources) ? envelope.sources : [];
+  const payloadPreview = draft?.payload_preview || null;
   const rawEvents = draft?.revision_events || envelope?.revision?.events || [];
   const events = Array.isArray(rawEvents) ? rawEvents : [];
   const changedKeys = new Set(events.map((event) => event.field_key));
@@ -940,6 +952,7 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
                     <div><dt>Original</dt><dd>{original || "Empty"}</dd></div>
                     <div><dt>Source</dt><dd>{field.source}</dd></div>
                     <div><dt>Confidence</dt><dd>{field.confidence == null ? "Not set" : `${Math.round(field.confidence * 100)}%`}</dd></div>
+                    <div><dt>Payload path</dt><dd>{field.payload_path || "Not sent"}</dd></div>
                     <div><dt>Freshdesk ID</dt><dd>{field.resolved_id || "Not resolved"}</dd></div>
                   </dl>
                 </article>
@@ -949,10 +962,11 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
             <div className="description-ledger">
               <div className="section-head">
                 <div>
-                  <span className="eyebrow">Structured Freshdesk Description</span>
-                  <h2>Long sections with guidance</h2>
+                  <span className="eyebrow">Freshdesk Description</span>
+                  <h2>Sections combined into one Description field</h2>
                 </div>
               </div>
+              <p className="section-copy">These sections are combined and sent to the single Freshdesk Description field.</p>
               {descriptionSections.map((section, index) => (
                 <article className={cls("section-editor", !String(section.content || "").trim() && "section-editor-missing")} key={section.key}>
                   <div className="ledger-number">{String(index + 1).padStart(2, "0")}</div>
@@ -989,6 +1003,26 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
                   <p>{source.snippet}</p>
                 </article>
               ))}
+            </section>
+
+            <section className="section">
+              <div className="section-head">
+                <div>
+                  <span className="eyebrow">Final Freshdesk payload</span>
+                  <h2>Exact payload before approval</h2>
+                </div>
+                <Badge tone={payloadPreview?.validation?.valid ? "good" : "alert"}>
+                  {payloadPreview?.validation?.valid ? "Valid" : "Blocked"}
+                </Badge>
+              </div>
+              <p className="section-copy">Description is one payload field. UI-only review names such as Product, Contact, Group, Agent, and Form must be resolved or mapped before submission.</p>
+              <pre className="feedback-json payload-preview-json">{JSON.stringify(payloadPreview?.payload || {}, null, 2)}</pre>
+              {payloadPreview?.mapping_notes?.length ? (
+                <div className="validation-box">
+                  <strong>Mapping notes</strong>
+                  <ReviewList items={payloadPreview.mapping_notes} empty="No mapping notes." />
+                </div>
+              ) : null}
             </section>
 
             <section className="section">
@@ -1109,6 +1143,7 @@ function AgentApiPanel({ metadata }) {
     "GET /api/v1/drafts/{id}",
     "PATCH /api/v1/drafts/{id}",
     "POST /api/v1/drafts/{id}/validate",
+    "GET /api/v1/drafts/{id}/payload-preview",
     "POST /api/v1/drafts/{id}/approve-and-submit {confirmation}",
     "POST /api/v1/feedback/approved-drafts",
   ];
