@@ -868,6 +868,64 @@ def test_change_service_sparse_and_malformed_sections_fall_back_safely(core, set
     assert document["verification"]["post_change"] == ["Confirm service health."]
 
 
+def test_change_service_enriches_weak_hsm_notes_instead_of_repeating_source(core, settings: Settings):
+    _, _, _, _, schema, _ = core
+    full_change_request_schema(schema)
+    notes = (
+        "Next Tuesday I need to upgrade two HSMs for Wise and these are wiseld5-hsm-2 and wiseld2-hsm-2. "
+        "we need to upgrade the software to version 2.3a first and then install mTLS "
+        "the change window for this will be from 9 a.m. to 6 p.m that day"
+    )
+
+    class StubLocalLLM:
+        def generate_json(self, prompt, source_text, max_tokens=0):
+            assert "Do not simply copy the full rough notes" in prompt
+            assert "phased device work" in prompt
+            return {
+                "title": "Change request",
+                "background": source_text,
+                "description": source_text,
+                "configuration_items": [],
+                "implementation_steps": [],
+                "rollback_plan": [],
+                "verification": {},
+            }
+
+    service = ChangeService(
+        StubLocalLLM(),
+        schema,
+        TicketDefaultsService(schema, lambda: settings),
+        now_provider=lambda: datetime(2026, 6, 10, 9, tzinfo=ZoneInfo("Europe/London")),
+    )
+
+    result = service.suggest(notes)
+    document = result["change_document"]
+    assert document["planned_change_date"] == "Tuesday 16 June 2026"
+    assert document["planned_start"] == "Tuesday 16 June 2026, 09:00 BST"
+    assert document["planned_end"] == "Tuesday 16 June 2026, 18:00 BST"
+    assert document["background"] != notes
+    assert document["change_description"] != notes
+    assert {item["name"] for item in document["configuration_items"] if item["item_type"] == "HSM"} == {
+        "wiseld5-hsm-2",
+        "wiseld2-hsm-2",
+    }
+    assert all(item["version"] == "Target software version 2.3a" for item in document["configuration_items"] if item["item_type"] == "HSM")
+    assert any("Upgrade wiseld5-hsm-2 to software version 2.3a." == step for step in document["implementation_steps"])
+    assert any("Install or enable the required mTLS configuration on wiseld2-hsm-2" in step for step in document["implementation_steps"])
+    assert "Stop further upgrades" in document["rollback_branches"][0]["steps"][0]
+    assert any("mTLS handshake" in item for item in document["verification"]["in_change"])
+    assert document["impact"] == "Moderate"
+
+    envelope = service._agent_envelope(notes, result)
+    sections = {section.key: section.content for section in envelope.description_sections}
+    assert "TBD" not in sections["config_items"]
+    assert "wiseld5-hsm-2" in sections["config_items"]
+    assert "Upgrade wiseld5-hsm-2 to software version 2.3a." in sections["implementation"]
+    assert "vendor or approved runbook" in sections["rollback"]
+    assert "mTLS handshake" in sections["verification"]
+    assert any("target software version" in item.text for item in envelope.assumptions)
+
+
 def test_change_service_returns_editable_fallback_for_invalid_model_json(core, settings: Settings):
     _, _, _, _, schema, _ = core
     change_schema(schema)
