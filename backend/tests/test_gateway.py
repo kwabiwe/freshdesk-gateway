@@ -153,6 +153,42 @@ def test_ticket_validator_accepts_requester_id_for_required_requester(core):
     assert result["missing_fields"] == []
 
 
+def test_ticket_validator_rejects_unknown_custom_fields(core):
+    _, _, _, _, schema, _ = core
+    schema.put("ticket_fields", [{"name": "cf_change_state", "label": "Change State"}])
+    result = TicketValidator(schema).validate(
+        {
+            "subject": "Subject",
+            "description": "Body",
+            "email": "requester@example.com",
+            "custom_fields": {"cf_unknown": "value"},
+        }
+    )
+
+    assert result["valid"] is False
+    assert result["invalid_custom_fields"] == ["cf_unknown"]
+
+
+def test_ticket_validator_rejects_invalid_custom_dropdown_values(core):
+    _, _, _, _, schema, _ = core
+    schema.put(
+        "ticket_fields",
+        [{"name": "cf_change_state", "label": "Change State", "choices": ["Pending approval", "Approved"]}],
+    )
+    result = TicketValidator(schema).validate(
+        {
+            "subject": "Subject",
+            "description": "Body",
+            "email": "requester@example.com",
+            "custom_fields": {"cf_change_state": "Banana"},
+        }
+    )
+
+    assert result["valid"] is False
+    assert result["invalid_custom_field_values"][0]["name"] == "cf_change_state"
+    assert result["invalid_custom_field_values"][0]["allowed_values"] == ["Pending approval", "Approved"]
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -811,6 +847,44 @@ def test_change_draft_save_rerenders_description_and_stores_structured_record(co
     assert draft["payload"]["description"] == render_change_html(document)
     assert draft["generated_output"]["change_document"]["title"] == document.title
     assert draft["generated_output"]["assumptions"] == ["Review date"]
+
+
+def test_change_draft_prepare_uses_mapped_title_when_form_subject_is_empty(core, settings: Settings):
+    _, _, _, _, schema, _ = core
+    change_schema(schema)
+    document = ChangeDocument.model_validate(wise_change_document())
+    service = ChangeService(None, schema, TicketDefaultsService(schema, lambda: settings))
+
+    values, _ = service.prepare_draft({"subject": "", "requester_email": "test@example.com", "change_document": document})
+
+    assert values["subject"] == document.title
+    assert values["description"] == render_change_html(document)
+
+
+def test_change_draft_approval_blocks_invalid_custom_field_override(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    change_schema(services.schema_cache)
+    sent: list[dict[str, object]] = []
+    services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 99}
+    client = TestClient(app)
+    response = client.post(
+        "/api/tickets/draft-change",
+        json={
+            "requester_email": "requester@example.com",
+            "change_document": wise_change_document(),
+            "custom_fields": {"cf_change_state": "Banana"},
+        },
+    )
+    assert response.status_code == 200
+    draft = response.json()
+    assert draft["validation_result"]["valid"] is False
+    assert draft["validation_result"]["invalid_custom_field_values"][0]["name"] == "cf_change_state"
+
+    response = client.post(f"/api/tickets/drafts/{draft['draft_id']}/approve-create", json={"confirmation": "CREATE"})
+
+    assert response.status_code == 422
+    assert sent == []
 
 
 def test_approval_workflow_creates_exact_draft(settings: Settings):

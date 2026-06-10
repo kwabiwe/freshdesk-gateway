@@ -45,6 +45,19 @@ class TicketValidator:
         self.schema = schema
 
     @staticmethod
+    def _choice_values(choices: Any) -> list[str]:
+        if isinstance(choices, list):
+            return [str(value) for value in choices]
+        if isinstance(choices, dict):
+            values: list[str] = []
+            for key, nested in choices.items():
+                values.append(str(key))
+                if isinstance(nested, (list, dict)):
+                    values.extend(TicketValidator._choice_values(nested))
+            return values
+        return []
+
+    @staticmethod
     def _missing(value: Any) -> bool:
         return value is None or value == "" or value == [] or (
             isinstance(value, str) and value.strip().lower() in {"tbd", "not provided", "unknown"}
@@ -54,7 +67,28 @@ class TicketValidator:
         missing: list[dict[str, Any]] = []
         warnings: list[str] = []
         invalid_fields = sorted(key for key in payload if key not in ALLOWED_TICKET_FIELDS)
+        invalid_custom_fields: list[str] = []
+        invalid_custom_field_values: list[dict[str, Any]] = []
         required_fields = self.schema.required_ticket_fields()
+        fields_by_name = {str(field.get("name")): field for field in self.schema.ticket_fields()}
+
+        for key, value in (payload.get("custom_fields") or {}).items():
+            name = str(key)
+            field = fields_by_name.get(name)
+            if not field or not name.startswith("cf_"):
+                invalid_custom_fields.append(name)
+                continue
+            choices = self._choice_values(field.get("choices"))
+            if choices and not self._missing(value) and str(value) not in choices:
+                invalid_custom_field_values.append(
+                    {
+                        "name": name,
+                        "label": field.get("label") or field.get("label_for_customers") or name,
+                        "value": value,
+                        "allowed_values": choices,
+                    }
+                )
+
         for field in required_fields:
             name = field.get("name", "")
             api_name = DEFAULT_FIELD_MAP.get(name, name)
@@ -106,11 +140,15 @@ class TicketValidator:
             warnings.append("Potential sensitive data detected. Remove or redact it before creation.")
         if invalid_fields:
             warnings.append(f"Unsupported Freshdesk ticket field(s): {', '.join(invalid_fields)}.")
+        if invalid_custom_fields:
+            warnings.append(f"Unsupported Freshdesk custom field(s): {', '.join(invalid_custom_fields)}.")
 
         return {
-            "valid": not missing and not findings and not invalid_fields,
+            "valid": not missing and not findings and not invalid_fields and not invalid_custom_fields and not invalid_custom_field_values,
             "missing_fields": missing,
             "invalid_fields": invalid_fields,
+            "invalid_custom_fields": sorted(invalid_custom_fields),
+            "invalid_custom_field_values": invalid_custom_field_values,
             "sensitive_data_findings": [finding.to_dict() for finding in findings],
             "warnings": warnings,
         }

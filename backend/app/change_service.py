@@ -323,8 +323,18 @@ class ChangeService:
             self.defaults.defaults("change"),
             proposed_custom_fields=values.get("custom_fields") or {},
         )
-        values = {**mapped.suggestions, **values, "description": rendered}
-        values["custom_fields"] = {**mapped.suggestions.get("custom_fields", {}), **(values.get("custom_fields") or {})}
+        provided_values = {
+            key: value
+            for key, value in values.items()
+            if key != "custom_fields" and value not in (None, "", [], {})
+        }
+        provided_custom_fields = {
+            key: value
+            for key, value in (values.get("custom_fields") or {}).items()
+            if value not in (None, "")
+        }
+        values = {**mapped.suggestions, **provided_values, "description": rendered}
+        values["custom_fields"] = {**mapped.suggestions.get("custom_fields", {}), **provided_custom_fields}
         stored = {
             "change_document": document.model_dump(),
             "assumptions": values.get("assumptions", []),
