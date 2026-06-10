@@ -1015,7 +1015,7 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
                   {payloadPreview?.validation?.valid ? "Valid" : "Blocked"}
                 </Badge>
               </div>
-              <p className="section-copy">Description is one payload field. UI-only review names such as Product, Contact, Group, Agent, and Form must be resolved or mapped before submission.</p>
+              <p className="section-copy">Description is one payload field. UI-only review names such as Product, Contact, Company, Group, Agent, and Form must be resolved or mapped before submission. Company is sent only when it can be verified for the selected Contact.</p>
               <pre className="feedback-json payload-preview-json">{JSON.stringify(payloadPreview?.payload || {}, null, 2)}</pre>
               {payloadPreview?.mapping_notes?.length ? (
                 <div className="validation-box">

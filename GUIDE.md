@@ -205,6 +205,8 @@ Before approval, the review panel also shows the exact outgoing Freshdesk payloa
 
 Product is treated as an ID-backed Freshdesk entity. The gateway never submits a top-level `product` key. If Product is supported and resolved from metadata, the payload uses `product_id`; if a required Product cannot be resolved to an ID, approval is blocked before Freshdesk is called.
 
+Company is treated as requester-owned Freshdesk metadata. The gateway does not attach the configured default `company_id` to a different Contact unless it can verify the requester belongs to that company, for example from the requester email domain or resolved contact metadata. If Freshdesk requires Company and the relationship cannot be verified, approval is blocked locally with a visible validation message.
+
 ## Rate Limits
 
 Defaults:

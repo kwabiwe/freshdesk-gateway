@@ -70,6 +70,7 @@ class TicketValidator:
         invalid_fields = sorted(key for key in payload if key not in ALLOWED_TICKET_FIELDS)
         invalid_custom_fields: list[str] = []
         invalid_custom_field_values: list[dict[str, Any]] = []
+        invalid_company_association: list[dict[str, Any]] = []
         invalid_tags: list[Any] = []
         required_fields = self.schema.required_ticket_fields()
         fields_by_name = {str(field.get("name")): field for field in self.schema.ticket_fields()}
@@ -78,6 +79,23 @@ class TicketValidator:
             tags = payload.get("tags")
             if not isinstance(tags, list) or any(not isinstance(tag, str) or self._missing(tag.strip()) for tag in tags):
                 invalid_tags = tags if isinstance(tags, list) else [tags]
+
+        company_id = payload.get("company_id")
+        requester_email = str(payload.get("email") or "").strip().lower()
+        if company_id not in (None, "") and requester_email:
+            company = self._company_by_id(company_id)
+            domain = requester_email.rpartition("@")[2]
+            domains = {str(item).lower() for item in (company or {}).get("domains", [])}
+            if domains and domain not in domains:
+                invalid_company_association.append(
+                    {
+                        "field": "company_id",
+                        "company_id": company_id,
+                        "company_name": (company or {}).get("name"),
+                        "requester_email": requester_email,
+                        "message": "Requester email domain does not belong to the selected Freshdesk company.",
+                    }
+                )
 
         for key, value in (payload.get("custom_fields") or {}).items():
             name = str(key)
@@ -149,16 +167,22 @@ class TicketValidator:
             warnings.append(f"Unsupported Freshdesk ticket field(s): {', '.join(invalid_fields)}.")
         if invalid_custom_fields:
             warnings.append(f"Unsupported Freshdesk custom field(s): {', '.join(invalid_custom_fields)}.")
+        if invalid_company_association:
+            warnings.append("Requester and company selection do not match Freshdesk company metadata.")
         if invalid_tags:
             warnings.append("Freshdesk tags must be an array of non-empty strings.")
 
         return {
-            "valid": not missing and not findings and not invalid_fields and not invalid_custom_fields and not invalid_custom_field_values and not invalid_tags,
+            "valid": not missing and not findings and not invalid_fields and not invalid_custom_fields and not invalid_custom_field_values and not invalid_company_association and not invalid_tags,
             "missing_fields": missing,
             "invalid_fields": invalid_fields,
             "invalid_custom_fields": sorted(invalid_custom_fields),
             "invalid_custom_field_values": invalid_custom_field_values,
+            "invalid_company_association": invalid_company_association,
             "invalid_tags": invalid_tags,
             "sensitive_data_findings": [finding.to_dict() for finding in findings],
             "warnings": warnings,
         }
+
+    def _company_by_id(self, company_id: Any) -> dict[str, Any] | None:
+        return next((company for company in self.schema.get("companies", []) if str(company.get("id")) == str(company_id)), None)

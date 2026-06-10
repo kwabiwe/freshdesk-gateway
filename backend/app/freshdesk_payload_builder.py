@@ -88,12 +88,8 @@ class FreshdeskPayloadBuilder:
             "source": defaults.get("source", 2),
         }
 
-        default_company_id = defaults.get("company_id")
-        if mode != "update" and default_company_id not in (None, ""):
-            payload["company_id"] = int(default_company_id)
-            notes.append(f"Mapped configured company to company_id {payload['company_id']}.")
-
         self._apply_contact(payload, fields.get("contact", {}), value("contact"), defaults, include_requester=mode != "update")
+        self._apply_company(payload, fields.get("contact", {}), value("contact"), defaults, mode, notes)
         self._apply_directory_id(payload, "group_id", fields.get("group", {}), "Group", notes)
         self._apply_directory_id(payload, "responder_id", fields.get("agent", {}), "Agent", notes)
 
@@ -159,6 +155,61 @@ class FreshdeskPayloadBuilder:
             payload.pop("email", None)
             payload.pop("name", None)
             payload["requester_id"] = int(contact_id)
+
+    def _apply_company(
+        self,
+        payload: dict[str, Any],
+        contact: dict[str, Any],
+        raw_value: Any,
+        defaults: dict[str, Any],
+        mode: str,
+        notes: list[str],
+    ) -> None:
+        if mode == "update":
+            return
+        default_company_id = defaults.get("company_id")
+        if default_company_id in (None, ""):
+            return
+
+        contact_company_id = contact.get("resolved_company_id") or contact.get("company_id")
+        if contact_company_id not in (None, ""):
+            payload["company_id"] = int(contact_company_id)
+            notes.append(f"Mapped Contact's Freshdesk company to company_id {payload['company_id']}.")
+            return
+
+        contact_value = _display(raw_value).strip()
+        contact_email = _email_from(contact_value)
+        if contact_email:
+            company = self._company_for_email(contact_email)
+            if company:
+                payload["company_id"] = int(company["id"])
+                notes.append(f"Mapped Contact email domain to company_id {payload['company_id']}.")
+                return
+
+        default_contact_email = defaults.get("requester_email", "")
+        default_contact_name = defaults.get("requester_name", "")
+        using_default_contact = bool(default_contact_email) and (
+            not contact_value or _loose_match(contact_value, default_contact_email) or _loose_match(contact_value, default_contact_name)
+        )
+        if using_default_contact:
+            payload["company_id"] = int(default_company_id)
+            notes.append(f"Mapped configured requester company to company_id {payload['company_id']}.")
+            return
+
+        if contact.get("resolved_id") not in (None, "") or contact_value:
+            notes.append(
+                "Skipped configured company_id because the selected Contact is not verified as belonging to that company."
+            )
+
+    def _company_for_email(self, email: str) -> dict[str, Any] | None:
+        domain = email.rpartition("@")[2].lower()
+        if not domain:
+            return None
+        for company in self.schema.get("companies", []):
+            domains = {str(item).lower() for item in (company.get("domains") or [])}
+            if domain in domains:
+                return company
+        return None
 
     @staticmethod
     def _apply_directory_id(payload: dict[str, Any], payload_key: str, field_record: dict[str, Any], label: str, notes: list[str]) -> None:

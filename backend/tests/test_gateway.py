@@ -158,6 +158,23 @@ def test_ticket_validator_rejects_malformed_tags(core):
     assert result["invalid_tags"] == ["change,network"]
 
 
+def test_ticket_validator_rejects_requester_company_domain_mismatch(core):
+    _, _, _, _, schema, _ = core
+    schema.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
+    result = TicketValidator(schema).validate(
+        {
+            "subject": "Subject",
+            "description": "Body",
+            "email": "requester@other.example",
+            "company_id": 7,
+        }
+    )
+
+    assert result["valid"] is False
+    assert result["invalid_company_association"][0]["field"] == "company_id"
+    assert result["invalid_company_association"][0]["company_name"] == "Example Limited"
+
+
 def test_ticket_validator_accepts_requester_id_for_required_requester(core):
     _, _, _, _, schema, _ = core
     schema.put(
@@ -1506,6 +1523,64 @@ def test_agent_contact_resolved_id_maps_to_requester_id(settings: Settings):
     assert sent[0]["requester_id"] == 321
     assert "email" not in sent[0]
     assert "contact" not in sent[0]
+
+
+def test_agent_omits_default_company_for_unverified_non_default_contact(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    services.schema_cache.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
+    services.schema_cache.put(
+        "ticket_fields",
+        [
+            {"name": "requester", "label": "Contact", "type": "default_requester", "required_for_agents": True},
+            {"name": "cf_form2", "label": "Form", "choices": ["Change Request"]},
+            {"name": "cf_ticket_type", "label": "Ticket Type", "choices": ["Change"]},
+        ],
+    )
+    sent: list[dict[str, object]] = []
+    services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 1234}
+    client = TestClient(app)
+    created = client.post("/api/v1/drafts", json=agent_payload()).json()
+    contact = next(field for field in created["envelope"]["ticket_fields"] if field["key"] == "contact")
+    contact.update({"display_value": "Ada Lovelace <ada@other.example>", "value": "Ada Lovelace <ada@other.example>", "resolved_id": None})
+    patched = client.patch(f"/api/v1/drafts/{created['draft_id']}", json={"edited_by": "kb", "ticket_fields": [contact]}).json()
+
+    response = client.post(f"/api/v1/drafts/{patched['draft_id']}/approve-and-submit", json={"confirmation": "CREATE"})
+
+    assert response.status_code == 200
+    assert sent[0]["email"] == "ada@other.example"
+    assert "company_id" not in sent[0]
+    assert any("Skipped configured company_id" in item for item in patched["payload_preview"]["mapping_notes"])
+
+
+def test_agent_blocks_required_company_when_contact_company_is_unverified(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    services.schema_cache.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
+    services.schema_cache.put(
+        "ticket_fields",
+        [
+            {"name": "requester", "label": "Contact", "type": "default_requester", "required_for_agents": True},
+            {"name": "company", "label": "Company", "type": "default_company", "required_for_agents": True},
+            {"name": "cf_form2", "label": "Form", "choices": ["Change Request"]},
+            {"name": "cf_ticket_type", "label": "Ticket Type", "choices": ["Change"]},
+        ],
+    )
+    sent: list[dict[str, object]] = []
+    services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 1234}
+    client = TestClient(app)
+    created = client.post("/api/v1/drafts", json=agent_payload()).json()
+    contact = next(field for field in created["envelope"]["ticket_fields"] if field["key"] == "contact")
+    contact.update({"display_value": "Ada Lovelace <ada@other.example>", "value": "Ada Lovelace <ada@other.example>", "resolved_id": None})
+    patched = client.patch(f"/api/v1/drafts/{created['draft_id']}", json={"edited_by": "kb", "ticket_fields": [contact]}).json()
+
+    response = client.post(f"/api/v1/drafts/{patched['draft_id']}/approve-and-submit", json={"confirmation": "CREATE"})
+
+    assert response.status_code == 422
+    assert sent == []
+    detail = response.json()["detail"]
+    assert detail["message"] == "AI agent draft validation failed."
+    assert any("could not verify that the selected Contact belongs" in item for item in detail["blocking"])
 
 
 def test_agent_delete_removes_unsubmitted_draft_from_review_inbox(settings: Settings):

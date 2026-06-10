@@ -924,20 +924,28 @@ class AgentDraftStore:
             envelope.missing_information,
             envelope.ticket_profile,
         )
+        payload = self._ticket_payload(envelope.model_dump())
         payload_validation = self.validator.validate(
-            self._ticket_payload(envelope.model_dump()),
+            payload,
             require_requester=envelope.mode != "update",
         )
-        result.blocking = list(dict.fromkeys([*result.blocking, *self._payload_validation_blocking(payload_validation)]))
+        result.blocking = list(dict.fromkeys([*result.blocking, *self._payload_validation_blocking(payload_validation, payload)]))
         result.warnings = list(dict.fromkeys([*envelope.validation.warnings, *result.warnings]))
         result.valid = not result.blocking
         return result
 
     @staticmethod
-    def _payload_validation_blocking(payload_validation: dict[str, Any]) -> list[str]:
+    def _payload_validation_blocking(payload_validation: dict[str, Any], payload: dict[str, Any] | None = None) -> list[str]:
+        payload = payload or {}
         blocking: list[str] = []
         for field in payload_validation.get("missing_fields", []):
-            blocking.append(f"Freshdesk payload is missing {field.get('label') or field.get('name')}.")
+            if field.get("name") == "company" and (payload.get("email") or payload.get("requester_id")):
+                blocking.append(
+                    "Company is required, but the gateway could not verify that the selected Contact belongs to a Freshdesk company. "
+                    "Use a Contact email that matches a synced company domain or select a resolved Contact/company before approval."
+                )
+            else:
+                blocking.append(f"Freshdesk payload is missing {field.get('label') or field.get('name')}.")
         invalid_fields = payload_validation.get("invalid_fields") or []
         if invalid_fields:
             blocking.append(f"Freshdesk payload has unsupported top-level field(s): {', '.join(invalid_fields)}.")
@@ -947,6 +955,10 @@ class AgentDraftStore:
         for item in payload_validation.get("invalid_custom_field_values") or []:
             allowed = ", ".join(str(value) for value in item.get("allowed_values", []))
             blocking.append(f"{item.get('label') or item.get('name')} must be one of: {allowed}.")
+        for item in payload_validation.get("invalid_company_association") or []:
+            blocking.append(
+                f"Requester {item.get('requester_email')} does not belong to company {item.get('company_name') or item.get('company_id')}."
+            )
         if payload_validation.get("invalid_tags"):
             blocking.append("Freshdesk payload tags must be an array of non-empty strings.")
         return blocking
