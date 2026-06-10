@@ -33,7 +33,7 @@ from app.schema_service import SchemaService
 from app.sensitive_data import detect_secrets
 from app.skill_registry import SkillRegistry
 from app.ticket_defaults import TicketDefaultsService
-from app.validators import TicketValidator
+from app.validators import ALLOWED_TICKET_FIELDS, TicketValidator
 
 
 @pytest.fixture
@@ -122,6 +122,108 @@ def test_draft_creation_validation_and_expiry(core):
             ((datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(), draft["draft_id"]),
         )
     assert drafts.get(draft["draft_id"])["expired"] is True
+
+
+def test_ticket_validator_rejects_unsupported_top_level_fields(core):
+    _, _, _, _, schema, _ = core
+    result = TicketValidator(schema).validate(
+        {
+            "subject": "Subject",
+            "description": "Body",
+            "email": "requester@example.com",
+            "product": "A24 Support",
+            "contact": "Ada",
+            "agent": "Engineer",
+            "group": "L3 Engineering",
+            "form": "Change Request",
+        }
+    )
+
+    assert result["valid"] is False
+    assert result["invalid_fields"] == ["agent", "contact", "form", "group", "product"]
+
+
+def test_ticket_validator_rejects_malformed_tags(core):
+    _, _, _, _, schema, _ = core
+    result = TicketValidator(schema).validate(
+        {
+            "subject": "Subject",
+            "description": "Body",
+            "email": "requester@example.com",
+            "tags": "change,network",
+        }
+    )
+
+    assert result["valid"] is False
+    assert result["invalid_tags"] == ["change,network"]
+
+
+def test_ticket_validator_rejects_company_without_resolved_requester(core):
+    _, _, _, _, schema, _ = core
+    schema.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
+    result = TicketValidator(schema).validate(
+        {
+            "subject": "Subject",
+            "description": "Body",
+            "email": "requester@other.example",
+            "company_id": 7,
+        }
+    )
+
+    assert result["valid"] is False
+    assert result["invalid_company_association"][0]["field"] == "company_id"
+    assert result["invalid_company_association"][0]["company_name"] == "Example Limited"
+    assert "resolved to a Freshdesk contact" in result["invalid_company_association"][0]["message"]
+
+
+def test_ticket_validator_accepts_requester_id_for_required_requester(core):
+    _, _, _, _, schema, _ = core
+    schema.put(
+        "ticket_fields",
+        [{"name": "requester", "label": "Search a requester", "type": "default_requester", "required_for_agents": True}],
+    )
+    result = TicketValidator(schema).validate(
+        {"subject": "Subject", "description": "Body", "requester_id": 123, "priority": 1, "status": 2, "source": 2}
+    )
+
+    assert result["valid"] is True
+    assert result["missing_fields"] == []
+
+
+def test_ticket_validator_rejects_unknown_custom_fields(core):
+    _, _, _, _, schema, _ = core
+    schema.put("ticket_fields", [{"name": "cf_change_state", "label": "Change State"}])
+    result = TicketValidator(schema).validate(
+        {
+            "subject": "Subject",
+            "description": "Body",
+            "email": "requester@example.com",
+            "custom_fields": {"cf_unknown": "value"},
+        }
+    )
+
+    assert result["valid"] is False
+    assert result["invalid_custom_fields"] == ["cf_unknown"]
+
+
+def test_ticket_validator_rejects_invalid_custom_dropdown_values(core):
+    _, _, _, _, schema, _ = core
+    schema.put(
+        "ticket_fields",
+        [{"name": "cf_change_state", "label": "Change State", "choices": ["Pending approval", "Approved"]}],
+    )
+    result = TicketValidator(schema).validate(
+        {
+            "subject": "Subject",
+            "description": "Body",
+            "email": "requester@example.com",
+            "custom_fields": {"cf_change_state": "Banana"},
+        }
+    )
+
+    assert result["valid"] is False
+    assert result["invalid_custom_field_values"][0]["name"] == "cf_change_state"
+    assert result["invalid_custom_field_values"][0]["allowed_values"] == ["Pending approval", "Approved"]
 
 
 @pytest.mark.parametrize(
@@ -288,6 +390,7 @@ def test_freshdesk_contact_and_company_search_use_autocomplete_endpoints(core, s
     assert client.search_companies("Acme")[0]["name"] == "Acme"
     assert urls == [
         "https://example.freshdesk.com/api/v2/contacts/autocomplete?term=Ada",
+        "https://example.freshdesk.com/api/v2/contacts/8",
         "https://example.freshdesk.com/api/v2/companies/autocomplete?name=Acme",
     ]
 
@@ -353,7 +456,8 @@ def test_ticket_defaults_use_configured_identity_and_cached_schema(core, setting
     schema.put("groups", [{"id": 9, "name": "L3 Engineering"}])
     defaults = TicketDefaultsService(schema, lambda: settings).defaults("change")
     assert defaults["requester_email"] == "test@example.com"
-    assert defaults["company_id"] == 7
+    assert defaults["company_id"] is None
+    assert defaults["identity_company_id"] == 7
     assert defaults["group_id"] == 9
     assert defaults["identity"]["agent_id"] == 8
     assert defaults["custom_fields"] == {
@@ -387,7 +491,7 @@ def test_draft_assistant_accepts_only_cached_schema_values(core, settings: Setti
     defaults = TicketDefaultsService(schema, lambda: settings)
     result = DraftAssistantService(StubLocalLLM(), schema, defaults).suggest("generic", "Notes")
     assert result["suggestions"]["group_id"] == 5
-    assert result["suggestions"]["company_id"] == 7
+    assert "company_id" not in result["suggestions"]
     assert result["suggestions"]["custom_fields"] == {"cf_business_impact": "Minor"}
     assert result["assumptions"] == ["Business impact is minor."]
 
@@ -458,6 +562,35 @@ def change_schema(schema: SchemaCache):
         ],
     )
     schema.put("groups", [{"id": 9, "name": "L3 Engineering"}])
+
+
+def full_change_request_schema(schema: SchemaCache):
+    schema.put(
+        "ticket_fields",
+        [
+            {"name": "product", "label": "Product", "type": "default_product", "choices": {"A24 Support": 205000014435}},
+            {"name": "requester", "label": "Contact", "type": "default_requester", "required_for_agents": True},
+            {"name": "subject", "label": "Subject", "type": "default_subject", "required_for_agents": True},
+            {"name": "cf_form2", "label": "Form", "type": "custom_dropdown", "choices": ["Change Request"]},
+            {"name": "cf_background_for_the_change", "label": "Background for the Change", "type": "custom_paragraph"},
+            {"name": "cf_change_type", "label": "Change Type", "type": "custom_dropdown", "choices": ["Standard", "Normal", "Emmergency"]},
+            {"name": "cf_requested_by", "label": "Requested By", "type": "custom_text"},
+            {"name": "cf_change_owner", "label": "Change owner", "type": "custom_text", "required_for_agents": True},
+            {"name": "cf_change_catergory", "label": "Change Category", "type": "custom_dropdown", "choices": ["Application", "Network"]},
+            {"name": "cf_chg_business_impact", "label": "CHG Business Impact", "type": "custom_dropdown", "choices": ["Minor", "Moderate", "Significant"]},
+            {"name": "cf_change_state", "label": "Change State", "type": "custom_dropdown", "required_for_agents": True, "choices": ["In progress", "Pending approval", "On-Hold", "Approved", "Rejected"]},
+            {"name": "cf_approval_state", "label": "Approval State", "type": "custom_dropdown", "choices": ["Not Yet Requested", "Requested", "Approved", "Rejected"]},
+            {"name": "cf_type", "label": "Ticket Type", "type": "nested_field", "choices": {"Change": {}, "Incident": {}}},
+            {"name": "status", "label": "Status", "type": "default_status", "required_for_agents": True, "choices": {"2": ["Open", "Open"], "3": ["Pending", "Pending"]}},
+            {"name": "cf_business_impact723800", "label": "Business Impact", "type": "custom_dropdown", "choices": ["Extensive", "Significant", "Moderate", "Minor"]},
+            {"name": "group", "label": "Group", "type": "default_group"},
+            {"name": "agent", "label": "Agent", "type": "default_agent"},
+            {"name": "priority", "label": "Priority", "type": "default_priority", "required_for_agents": True, "choices": {"Low": 1, "Medium": 2, "High": 3, "Urgent": 4}},
+            {"name": "description", "label": "Description", "type": "default_description", "required_for_agents": True},
+            {"name": "cf_customer967575", "label": "Customer", "type": "custom_dropdown", "required_for_agents": True, "choices": ["Example", "A24"]},
+            {"name": "cf_reminder_date", "label": "Reminder Date", "type": "custom_date"},
+        ],
+    )
 
 
 def wise_change_document():
@@ -735,6 +868,69 @@ def test_change_service_sparse_and_malformed_sections_fall_back_safely(core, set
     assert document["verification"]["post_change"] == ["Confirm service health."]
 
 
+def test_change_service_enriches_weak_hsm_notes_instead_of_repeating_source(core, settings: Settings):
+    _, _, _, _, schema, _ = core
+    full_change_request_schema(schema)
+    notes = (
+        "Next Tuesday I need to upgrade two HSMs for Wise and these are wiseld5-hsm-2 and wiseld2-hsm-2. "
+        "we need to upgrade the software to version 2.3a first and then install mTLS "
+        "the change window for this will be from 9 a.m. to 6 p.m that day"
+    )
+
+    class StubLocalLLM:
+        def generate_json(self, prompt, source_text, max_tokens=0):
+            assert "Do not simply copy the full rough notes" in prompt
+            assert "phased device work" in prompt
+            assert "Freshdesk-visible fields must read as if written by the change requester" in prompt
+            return {
+                "title": "Change request",
+                "background": source_text,
+                "description": source_text,
+                "configuration_items": [],
+                "implementation_steps": [],
+                "rollback_plan": [],
+                "verification": {},
+            }
+
+    service = ChangeService(
+        StubLocalLLM(),
+        schema,
+        TicketDefaultsService(schema, lambda: settings),
+        now_provider=lambda: datetime(2026, 6, 10, 9, tzinfo=ZoneInfo("Europe/London")),
+    )
+
+    result = service.suggest(notes)
+    document = result["change_document"]
+    assert document["planned_change_date"] == "Tuesday 16 June 2026"
+    assert document["planned_start"] == "Tuesday 16 June 2026, 09:00 BST"
+    assert document["planned_end"] == "Tuesday 16 June 2026, 18:00 BST"
+    assert document["background"] != notes
+    assert "notes" not in document["background"].lower()
+    assert document["change_description"] != notes
+    assert {item["name"] for item in document["configuration_items"] if item["item_type"] == "HSM"} == {
+        "wiseld5-hsm-2",
+        "wiseld2-hsm-2",
+    }
+    assert all(item["version"] == "Target software version 2.3a" for item in document["configuration_items"] if item["item_type"] == "HSM")
+    assert any("Upgrade wiseld5-hsm-2 to software version 2.3a." == step for step in document["implementation_steps"])
+    assert any("Install or enable the required mTLS configuration on wiseld2-hsm-2" in step for step in document["implementation_steps"])
+    assert "Stop further upgrades" in document["rollback_branches"][0]["steps"][0]
+    assert any("mTLS handshake" in item for item in document["verification"]["in_change"])
+    assert document["impact"] == "Moderate"
+    rendered = result["rendered_description"].lower()
+    for forbidden in ["rough notes", "source notes", "source material", "prompt", "model", "ai wrote", "the notes identify"]:
+        assert forbidden not in rendered
+
+    envelope = service._agent_envelope(notes, result)
+    sections = {section.key: section.content for section in envelope.description_sections}
+    assert "TBD" not in sections["config_items"]
+    assert "wiseld5-hsm-2" in sections["config_items"]
+    assert "Upgrade wiseld5-hsm-2 to software version 2.3a." in sections["implementation"]
+    assert "vendor or approved runbook" in sections["rollback"]
+    assert "mTLS handshake" in sections["verification"]
+    assert any("target software version" in item.text for item in envelope.assumptions)
+
+
 def test_change_service_returns_editable_fallback_for_invalid_model_json(core, settings: Settings):
     _, _, _, _, schema, _ = core
     change_schema(schema)
@@ -784,6 +980,155 @@ def test_change_draft_save_rerenders_description_and_stores_structured_record(co
     assert draft["generated_output"]["assumptions"] == ["Review date"]
 
 
+def test_change_draft_prepare_uses_mapped_title_when_form_subject_is_empty(core, settings: Settings):
+    _, _, _, _, schema, _ = core
+    change_schema(schema)
+    document = ChangeDocument.model_validate(wise_change_document())
+    service = ChangeService(None, schema, TicketDefaultsService(schema, lambda: settings))
+
+    values, _ = service.prepare_draft({"subject": "", "requester_email": "test@example.com", "change_document": document})
+
+    assert values["subject"] == document.title
+    assert values["description"] == render_change_html(document)
+
+
+def test_change_draft_from_structured_notes_uses_valid_freshdesk_payload(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    change_schema(services.schema_cache)
+    client = TestClient(app)
+    document_value = {**wise_change_document(), "impact": "Moderate"}
+    document = ChangeDocument.model_validate(document_value)
+
+    response = client.post(
+        "/api/tickets/draft-change",
+        json={"requester_email": "requester@example.com", "change_document": document_value},
+    )
+
+    assert response.status_code == 200
+    draft = response.json()
+    payload = draft["payload"]
+    assert set(payload) <= ALLOWED_TICKET_FIELDS
+    assert "product" not in payload
+    assert payload["subject"] == document.title
+    assert payload["description"] == render_change_html(document)
+    assert payload["custom_fields"]["cf_form2"] == "Change Request"
+    assert payload["custom_fields"]["cf_type"] == "Change"
+    assert payload["custom_fields"]["cf_customer967575"] == "Wise_UK"
+    assert payload["custom_fields"]["cf_change_type"] == "Normal"
+    assert payload["custom_fields"]["cf_change_state"] == "Pending approval"
+    assert payload["custom_fields"]["cf_chg_business_impact"] == "Moderate"
+    assert draft["validation_result"]["invalid_fields"] == []
+    assert draft["validation_result"]["invalid_custom_fields"] == []
+    assert draft["validation_result"]["invalid_custom_field_values"] == []
+
+
+def test_change_style_llm_creates_agent_review_draft(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    full_change_request_schema(services.schema_cache)
+    services.schema_cache.put(
+        "ticket_fields",
+        [
+            *services.schema_cache.ticket_fields(),
+            {"name": "company", "label": "Company", "type": "default_company", "required_for_agents": True},
+        ],
+    )
+    services.schema_cache.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
+    services.schema_cache.put("groups", [{"id": 9, "name": "L3 Engineering"}])
+    services.schema_cache.put("agents", [{"id": 8, "contact": {"name": "Kwabiwe Sibanda"}}])
+
+    class StubLocalLLM:
+        def generate_json(self, prompt, source_text, max_tokens=0):
+            assert "Freshdesk Change Request form" in prompt
+            assert "relationship fields unresolved" in prompt
+            return {
+                "change_document": {**wise_change_document(), "customer": "Example"},
+                "custom_fields": {"cf_customer967575": "Example", "cf_change_type": "Normal"},
+                "assumptions": ["Assumed phased HSM upgrade is a normal change."],
+                "open_questions": ["Confirm exact implementation window."],
+            }
+
+    services.changes.local_llm = StubLocalLLM()
+
+    response = TestClient(app).post("/api/tickets/draft-change-review", json={"text": "Upgrade Wise UK HSMs next Tuesday."})
+
+    assert response.status_code == 200
+    body = response.json()
+    draft = body["draft"]
+    fields = draft["envelope"]["ticket_fields"]
+    labels = [field["label"] for field in fields]
+    assert labels.index("Company") < labels.index("Contact")
+    assert "Description" not in labels
+    field_by_key = {field["key"]: field for field in fields}
+    assert field_by_key["form"]["display_value"] == "Change Request"
+    assert field_by_key["customer"]["display_value"] == "Example"
+    assert field_by_key["company"]["status"] == "missing"
+    assert field_by_key["contact"]["status"] in {"missing", "needs_human_choice"}
+    assert "Search and select" in " ".join(field_by_key["contact"]["field_errors"])
+    assert draft["payload_preview"]["payload"]["description"]
+    assert "company_id" not in draft["payload_preview"]["payload"]
+    assert "requester_id" not in draft["payload_preview"]["payload"]
+    assert any(item["text"] == "Assumed phased HSM upgrade is a normal change." for item in draft["envelope"]["assumptions"])
+    assert any(item["field"] == "Open question" and "implementation window" in item["reason"] for item in draft["envelope"]["missing_information"])
+
+
+def test_change_draft_blocks_company_without_resolved_requester(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    change_schema(services.schema_cache)
+    services.schema_cache.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
+    sent: list[dict[str, object]] = []
+    services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 99}
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/tickets/draft-change",
+        json={
+            "requester_email": "requester@example.com",
+            "company_id": 7,
+            "change_document": wise_change_document(),
+        },
+    )
+
+    assert response.status_code == 200
+    draft = response.json()
+    assert draft["validation_status"] == "invalid"
+    assert draft["payload"]["company_id"] == 7
+    assert "resolved to a Freshdesk contact" in draft["validation_result"]["invalid_company_association"][0]["message"]
+
+    approval = client.post(f"/api/tickets/drafts/{draft['draft_id']}/approve-create", json={"confirmation": "CREATE"})
+
+    assert approval.status_code == 422
+    assert sent == []
+
+
+def test_change_draft_approval_blocks_invalid_custom_field_override(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    change_schema(services.schema_cache)
+    sent: list[dict[str, object]] = []
+    services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 99}
+    client = TestClient(app)
+    response = client.post(
+        "/api/tickets/draft-change",
+        json={
+            "requester_email": "requester@example.com",
+            "change_document": wise_change_document(),
+            "custom_fields": {"cf_change_state": "Banana"},
+        },
+    )
+    assert response.status_code == 200
+    draft = response.json()
+    assert draft["validation_result"]["valid"] is False
+    assert draft["validation_result"]["invalid_custom_field_values"][0]["name"] == "cf_change_state"
+
+    response = client.post(f"/api/tickets/drafts/{draft['draft_id']}/approve-create", json={"confirmation": "CREATE"})
+
+    assert response.status_code == 422
+    assert sent == []
+
+
 def test_approval_workflow_creates_exact_draft(settings: Settings):
     app = create_app(settings)
     services = app.state.services
@@ -828,8 +1173,7 @@ def agent_payload() -> dict[str, object]:
         "status": "ready_for_review",
         "ticket_fields": [
             {"key": "subject", "kind": "short_text", "display_value": "Mailbox routing change", "required": True, "status": "confirmed", "confidence": 0.9},
-            {"key": "group", "kind": "entity_ref", "display_value": "L3 Engineer", "resolved_id": 999, "required": True, "status": "inferred", "confidence": 0.8},
-            {"key": "agent", "kind": "entity_ref", "display_value": "Kwabiwe Sibanda", "required": True, "status": "confirmed"},
+            {"key": "contact", "kind": "entity_ref", "display_value": "Test User <test@example.com>", "required": True, "status": "confirmed", "confidence": 0.9},
             {"key": "form", "kind": "enum", "display_value": "Change Request", "required": True, "status": "inferred"},
             {"key": "ticket_type", "kind": "enum", "display_value": "Change", "required": True, "status": "inferred"},
             {"key": "status", "kind": "enum", "display_value": "Open", "required": True, "status": "confirmed"},
@@ -894,10 +1238,118 @@ def test_agent_change_request_profile_adds_a24_form_fields(settings: Settings):
     assert fields["form"]["schema_field_name"] == "cf_form2"
     assert fields["ticket_type"]["schema_field_name"] == "cf_type"
     assert fields["ticket_type"]["display_value"] == "Change"
-    assert fields["cf_background_for_the_change"]["label"] == "Background for the Change"
-    assert fields["cf_change_owner"]["display_value"] == "Test User"
-    assert fields["cf_change_state"]["display_value"] == "Pending approval"
-    assert fields["cf_approval_state"]["display_value"] == "Not Yet Requested"
+    assert fields["background_for_the_change"]["label"] == "Background for the Change"
+    assert fields["change_owner"]["display_value"] == "Test User"
+    assert fields["change_state"]["display_value"] == "Pending approval"
+    assert fields["approval_state"]["display_value"] == "Not Yet Requested"
+    assert fields["change_type"]["payload_path"] == "custom_fields.cf_change_type"
+
+
+def test_agent_change_request_ledger_matches_freshdesk_form_order(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    full_change_request_schema(services.schema_cache)
+    services.schema_cache.put("agents", [{"id": 8, "contact": {"name": "Kwabiwe Sibanda"}}])
+    services.schema_cache.put("groups", [{"id": 9, "name": "L3 Engineering"}])
+
+    response = TestClient(app).post("/api/v1/drafts", json=agent_payload())
+
+    assert response.status_code == 200
+    fields = response.json()["envelope"]["ticket_fields"]
+    assert [field["label"] for field in fields] == [
+        "Product",
+        "Contact",
+        "Subject",
+        "Form",
+        "Background for the Change",
+        "Change Type",
+        "Requested By",
+        "Change owner",
+        "Change Category",
+        "CHG Business Impact",
+        "Change State",
+        "Approval State",
+        "Ticket Type",
+        "Status",
+        "Business Impact",
+        "Group",
+        "Agent",
+        "Priority",
+        "Customer",
+        "Reminder Date",
+        "Tags",
+    ]
+    assert "Description" not in [field["label"] for field in fields]
+    payload_paths = {field["key"]: field["payload_path"] for field in fields}
+    assert payload_paths["product"] == "product_id"
+    assert payload_paths["contact"] == "email/name"
+    assert payload_paths["change_category"] == "custom_fields.cf_change_catergory"
+    assert payload_paths["ticket_type"] == "custom_fields.cf_type"
+    assert payload_paths["business_impact"] == "custom_fields.cf_business_impact723800"
+    assert payload_paths["tags"] == "tags"
+
+
+def test_agent_change_request_adds_required_company_before_contact(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    full_change_request_schema(services.schema_cache)
+    services.schema_cache.put(
+        "ticket_fields",
+        [
+            *services.schema_cache.ticket_fields(),
+            {"name": "company", "label": "Company", "type": "default_company", "required_for_agents": True},
+        ],
+    )
+    services.schema_cache.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
+    services.schema_cache.put("agents", [{"id": 8, "contact": {"name": "Kwabiwe Sibanda"}}])
+    services.schema_cache.put("groups", [{"id": 9, "name": "L3 Engineering"}])
+
+    response = TestClient(app).post("/api/v1/drafts", json=agent_payload())
+
+    assert response.status_code == 200
+    fields = response.json()["envelope"]["ticket_fields"]
+    labels = [field["label"] for field in fields]
+    assert labels.index("Company") < labels.index("Contact")
+    company = next(field for field in fields if field["key"] == "company")
+    assert company["payload_path"] == "company_id"
+    assert company["status"] == "missing"
+
+
+def test_agent_autofills_company_from_selected_contact(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    full_change_request_schema(services.schema_cache)
+    services.schema_cache.put(
+        "ticket_fields",
+        [
+            *services.schema_cache.ticket_fields(),
+            {"name": "company", "label": "Company", "type": "default_company", "required_for_agents": True},
+        ],
+    )
+    services.schema_cache.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
+    services.schema_cache.put("agents", [{"id": 8, "contact": {"name": "Kwabiwe Sibanda"}}])
+    services.schema_cache.put("groups", [{"id": 9, "name": "L3 Engineering"}])
+    client = TestClient(app)
+    created = client.post("/api/v1/drafts", json=agent_payload()).json()
+    contact = next(field for field in created["envelope"]["ticket_fields"] if field["key"] == "contact")
+    contact.update(
+        {
+            "display_value": "Ada Lovelace",
+            "value": "Ada Lovelace",
+            "resolved_id": 321,
+            "email": "ada@example.com",
+            "company_id": 7,
+            "record": {"id": 321, "name": "Ada Lovelace", "email": "ada@example.com", "company_id": 7},
+        }
+    )
+
+    patched = client.patch(f"/api/v1/drafts/{created['draft_id']}", json={"edited_by": "kb", "ticket_fields": [contact]}).json()
+
+    fields = {field["key"]: field for field in patched["envelope"]["ticket_fields"]}
+    assert fields["company"]["display_value"] == "Example Limited"
+    assert fields["company"]["resolved_id"] == 7
+    assert patched["payload_preview"]["payload"]["company_id"] == 7
+    assert patched["validation_result"]["valid"] is True
 
 
 def test_agent_lists_submitted_drafts_for_review_inbox(settings: Settings):
@@ -962,7 +1414,7 @@ def test_agent_patch_tracks_revision_and_feedback_payload(settings: Settings):
     assert submitted["feedback_payload"]["freshdesk_payload"]["subject"] == "Mailbox routing change - reviewed"
 
 
-def test_agent_submit_includes_default_company_when_required(settings: Settings):
+def test_agent_submit_includes_contact_company_when_required(settings: Settings):
     app = create_app(settings)
     services = app.state.services
     services.schema_cache.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
@@ -978,11 +1430,388 @@ def test_agent_submit_includes_default_company_when_required(settings: Settings)
     services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 1234}
     client = TestClient(app)
     created = client.post("/api/v1/drafts", json=agent_payload()).json()
+    contact = next(field for field in created["envelope"]["ticket_fields"] if field["key"] == "contact")
+    contact.update(
+        {
+            "display_value": "Ada Lovelace",
+            "value": "Ada Lovelace",
+            "resolved_id": 321,
+            "company_id": 7,
+            "record": {"id": 321, "name": "Ada Lovelace", "email": "ada@example.com", "company_id": 7},
+        }
+    )
+    patched = client.patch(f"/api/v1/drafts/{created['draft_id']}", json={"edited_by": "kb", "ticket_fields": [contact]}).json()
+
+    response = client.post(f"/api/v1/drafts/{patched['draft_id']}/approve-and-submit", json={"confirmation": "CREATE"})
+
+    assert response.status_code == 200
+    assert sent[0]["company_id"] == 7
+
+
+def test_agent_submit_maps_change_request_fields_to_valid_freshdesk_payload(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    services.schema_cache.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
+    services.schema_cache.put("agents", [{"id": 8, "name": "Kwabiwe Sibanda", "contact": {"name": "Kwabiwe Sibanda"}}])
+    services.schema_cache.put("groups", [{"id": 9, "name": "L3 Engineering"}])
+    services.schema_cache.put(
+        "ticket_fields",
+        [
+            {"name": "requester", "label": "Search a requester", "type": "default_requester", "required_for_agents": True},
+            {"name": "subject", "label": "Subject", "type": "default_subject", "required_for_agents": True},
+            {"name": "status", "label": "Status", "type": "default_status", "required_for_agents": True, "choices": {"2": ["Open", "Open"], "3": ["Pending", "Pending"]}},
+            {"name": "priority", "label": "Priority", "type": "default_priority", "required_for_agents": True, "choices": {"Low": 1, "Medium": 2}},
+            {"name": "description", "label": "Description", "type": "default_description", "required_for_agents": True},
+            {"name": "company", "label": "Company", "type": "default_company", "required_for_agents": True},
+            {"name": "product", "label": "Product", "type": "default_product", "choices": {"A24 Support": 205000014435}},
+            {"name": "cf_form2", "label": "Form", "type": "custom_dropdown", "choices": ["Change Request"]},
+            {"name": "cf_type", "label": "Ticket Type", "type": "nested_field", "choices": {"Change": {}}},
+            {"name": "cf_customer967575", "label": "Customer", "type": "custom_dropdown", "required_for_agents": True, "choices": ["Example", "A24"]},
+            {"name": "cf_business_impact723800", "label": "Business Impact", "type": "custom_dropdown", "choices": ["Minor", "Moderate"]},
+            {"name": "cf_change_type", "label": "Change Type", "type": "custom_dropdown", "choices": ["Standard", "Normal"]},
+            {"name": "cf_change_state", "label": "Change State", "type": "custom_dropdown", "required_for_agents": True, "choices": ["Pending approval", "Approved"]},
+            {"name": "cf_change_owner", "label": "Change owner", "type": "custom_text", "required_for_agents": True},
+            {"name": "cf_requested_by", "label": "Requested by", "type": "custom_text"},
+            {"name": "cf_approval_state", "label": "Approval State", "type": "custom_dropdown", "choices": ["Not Yet Requested"]},
+        ],
+    )
+    sent: list[dict[str, object]] = []
+    services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 1234}
+    client = TestClient(app)
+    created = client.post("/api/v1/drafts", json=agent_payload()).json()
+    contact = next(field for field in created["envelope"]["ticket_fields"] if field["key"] == "contact")
+    contact.update(
+        {
+            "display_value": "Ada Lovelace",
+            "value": "Ada Lovelace",
+            "resolved_id": 321,
+            "company_id": 7,
+            "record": {"id": 321, "name": "Ada Lovelace", "email": "ada@example.com", "company_id": 7},
+        }
+    )
+    created = client.patch(f"/api/v1/drafts/{created['draft_id']}", json={"edited_by": "kb", "ticket_fields": [contact]}).json()
 
     response = client.post(f"/api/v1/drafts/{created['draft_id']}/approve-and-submit", json={"confirmation": "CREATE"})
 
     assert response.status_code == 200
-    assert sent[0]["company_id"] == 7
+    payload = sent[0]
+    assert set(payload) <= ALLOWED_TICKET_FIELDS
+    assert "product" not in payload
+    assert payload["product_id"] == 205000014435
+    assert payload["company_id"] == 7
+    assert payload["group_id"] == 9
+    assert payload["responder_id"] == 8
+    assert payload["requester_id"] == 321
+    assert "email" not in payload
+    assert payload["priority"] == 1
+    assert payload["status"] == 2
+    assert "<h2>Scope of the change</h2><p>Update mailbox routing only.</p>" in payload["description"]
+    assert "<h2>Implementation steps</h2><p>Update routing rule and test delivery.</p>" in payload["description"]
+    assert payload["custom_fields"]["cf_form2"] == "Change Request"
+    assert payload["custom_fields"]["cf_type"] == "Change"
+    assert payload["custom_fields"]["cf_customer967575"] == "Example"
+    assert payload["custom_fields"]["cf_business_impact723800"] == "Minor"
+    assert payload["custom_fields"]["cf_change_type"] == "Normal"
+    assert payload["custom_fields"]["cf_change_state"] == "Pending approval"
+    assert payload["custom_fields"]["cf_change_owner"] == "Test User"
+
+
+def test_agent_payload_preview_matches_payload_sent_on_approval(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    services.schema_cache.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
+    services.schema_cache.put("agents", [{"id": 8, "name": "Kwabiwe Sibanda", "contact": {"name": "Kwabiwe Sibanda"}}])
+    services.schema_cache.put("groups", [{"id": 9, "name": "L3 Engineering"}])
+    full_change_request_schema(services.schema_cache)
+    sent: list[dict[str, object]] = []
+    services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 1234}
+    client = TestClient(app)
+    created = client.post("/api/v1/drafts", json=agent_payload()).json()
+    preview = client.get(f"/api/v1/drafts/{created['draft_id']}/payload-preview").json()
+
+    response = client.post(f"/api/v1/drafts/{created['draft_id']}/approve-and-submit", json={"confirmation": "CREATE"})
+
+    assert response.status_code == 200
+    assert preview["validation"]["valid"] is True
+    assert preview["payload"] == sent[0]
+    assert "description" in preview["payload"]
+    assert "product" not in preview["payload"]
+
+
+def test_agent_description_sections_map_to_one_description_payload_field(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    services.schema_cache.put(
+        "ticket_fields",
+        [
+            {"name": "requester", "label": "Contact", "type": "default_requester", "required_for_agents": True},
+            {"name": "cf_form2", "label": "Form", "choices": ["Change Request"]},
+            {"name": "cf_ticket_type", "label": "Ticket Type", "choices": ["Change"]},
+        ],
+    )
+    sent: list[dict[str, object]] = []
+    services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 1234}
+    client = TestClient(app)
+    created = client.post("/api/v1/drafts", json=agent_payload()).json()
+
+    response = client.post(f"/api/v1/drafts/{created['draft_id']}/approve-and-submit", json={"confirmation": "CREATE"})
+
+    assert response.status_code == 200
+    payload = sent[0]
+    assert list(key for key in payload if key == "description") == ["description"]
+    assert "<h2>Implementation steps</h2>" in payload["description"]
+    assert "<h2>Rollback plan</h2>" in payload["description"]
+    assert "<h2>Test or verification steps</h2>" in payload["description"]
+    assert "implementation" not in payload
+    assert "rollback" not in payload
+    assert "verification" not in payload
+    assert not {"implementation", "rollback", "verification"} & set(payload.get("custom_fields", {}))
+
+
+def test_agent_custom_fields_use_synced_freshdesk_names(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    services.schema_cache.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
+    services.schema_cache.put("agents", [{"id": 8, "name": "Kwabiwe Sibanda", "contact": {"name": "Kwabiwe Sibanda"}}])
+    services.schema_cache.put("groups", [{"id": 9, "name": "L3 Engineering"}])
+    full_change_request_schema(services.schema_cache)
+    sent: list[dict[str, object]] = []
+    services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 1234}
+    payload = agent_payload()
+    payload["ticket_fields"] = [
+        *payload["ticket_fields"],
+        {"key": "background_for_the_change", "display_value": "Reduce manual intervention.", "status": "confirmed"},
+        {"key": "change_type", "display_value": "Normal", "status": "confirmed"},
+        {"key": "requested_by", "display_value": "Test User", "status": "confirmed"},
+        {"key": "change_owner", "display_value": "Test User", "required": True, "status": "confirmed"},
+        {"key": "change_category", "display_value": "Application", "status": "confirmed"},
+        {"key": "chg_business_impact", "display_value": "Moderate", "status": "confirmed"},
+        {"key": "change_state", "display_value": "Pending approval", "required": True, "status": "confirmed"},
+        {"key": "approval_state", "display_value": "Not Yet Requested", "status": "confirmed"},
+        {"key": "customer", "display_value": "Example", "required": True, "status": "confirmed"},
+        {"key": "reminder_date", "display_value": "2026-06-15", "status": "confirmed"},
+        {"key": "tags", "display_value": "change, network\napproved", "status": "confirmed"},
+    ]
+    client = TestClient(app)
+    created = client.post("/api/v1/drafts", json=payload).json()
+
+    response = client.post(f"/api/v1/drafts/{created['draft_id']}/approve-and-submit", json={"confirmation": "CREATE"})
+
+    assert response.status_code == 200
+    custom_fields = sent[0]["custom_fields"]
+    assert custom_fields["cf_form2"] == "Change Request"
+    assert custom_fields["cf_change_type"] == "Normal"
+    assert custom_fields["cf_change_owner"] == "Test User"
+    assert custom_fields["cf_change_catergory"] == "Application"
+    assert custom_fields["cf_chg_business_impact"] == "Moderate"
+    assert custom_fields["cf_change_state"] == "Pending approval"
+    assert custom_fields["cf_approval_state"] == "Not Yet Requested"
+    assert custom_fields["cf_type"] == "Change"
+    assert custom_fields["cf_customer967575"] == "Example"
+    assert custom_fields["cf_business_impact723800"] == "Minor"
+    assert custom_fields["cf_reminder_date"] == "2026-06-15"
+    assert sent[0]["tags"] == ["change", "network", "approved"]
+
+
+def test_agent_dropdown_choices_are_enforced(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    services.schema_cache.put(
+        "ticket_fields",
+        [
+            {"name": "requester", "label": "Contact", "type": "default_requester", "required_for_agents": True},
+            {"name": "cf_form2", "label": "Form", "choices": ["Change Request"]},
+            {"name": "cf_ticket_type", "label": "Ticket Type", "choices": ["Change"]},
+            {"name": "cf_change_type", "label": "Change Type", "required_for_agents": True, "choices": ["Standard", "Normal", "Emmergency"]},
+        ],
+    )
+    sent: list[dict[str, object]] = []
+    services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 1234}
+    payload = agent_payload()
+    payload["ticket_fields"] = [
+        *payload["ticket_fields"],
+        {"key": "change_type", "display_value": "Emergency", "required": True, "status": "confirmed"},
+    ]
+    client = TestClient(app)
+    created = client.post("/api/v1/drafts", json=payload).json()
+    field = next(item for item in created["envelope"]["ticket_fields"] if item["key"] == "change_type")
+
+    response = client.post(f"/api/v1/drafts/{created['draft_id']}/approve-and-submit", json={"confirmation": "CREATE"})
+
+    assert field["status"] == "needs_human_choice"
+    assert response.status_code == 422
+    assert sent == []
+    assert "Choose an allowed value for Change Type." in response.json()["detail"]["blocking"]
+
+
+def test_agent_submit_blocks_required_product_without_safe_product_id(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    services.schema_cache.put(
+        "ticket_fields",
+        [
+            {"name": "product", "label": "Product", "type": "default_product", "required_for_agents": True, "choices": ["A24 Support"]},
+            {"name": "cf_form2", "label": "Form", "choices": ["Change Request"]},
+            {"name": "cf_ticket_type", "label": "Ticket Type", "choices": ["Change"]},
+        ],
+    )
+    sent: list[dict[str, object]] = []
+    services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 1234}
+    client = TestClient(app)
+    created = client.post("/api/v1/drafts", json=agent_payload()).json()
+
+    response = client.post(f"/api/v1/drafts/{created['draft_id']}/approve-and-submit", json={"confirmation": "CREATE"})
+
+    assert response.status_code == 422
+    assert sent == []
+    detail = response.json()["detail"]
+    assert detail["message"] == "AI agent draft validation failed."
+    assert "Freshdesk payload is missing Product." in detail["blocking"]
+
+
+def test_agent_submit_blocks_unresolved_non_default_contact(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    services.schema_cache.put(
+        "ticket_fields",
+        [
+            {"name": "requester", "label": "Search a requester", "type": "default_requester", "required_for_agents": True},
+            {"name": "cf_form2", "label": "Form", "choices": ["Change Request"]},
+            {"name": "cf_ticket_type", "label": "Ticket Type", "choices": ["Change"]},
+        ],
+    )
+    sent: list[dict[str, object]] = []
+    services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 1234}
+    client = TestClient(app)
+    created = client.post("/api/v1/drafts", json=agent_payload()).json()
+    contact = next(field for field in created["envelope"]["ticket_fields"] if field["key"] == "contact")
+    contact["display_value"] = "Ada Lovelace"
+    contact["value"] = "Ada Lovelace"
+    contact["resolved_id"] = None
+    patched = client.patch(
+        f"/api/v1/drafts/{created['draft_id']}",
+        json={"edited_by": "kb", "ticket_fields": [contact], "reason": "Test unresolved requester"},
+    ).json()
+
+    response = client.post(f"/api/v1/drafts/{patched['draft_id']}/approve-and-submit", json={"confirmation": "CREATE"})
+
+    assert response.status_code == 422
+    assert sent == []
+    detail = response.json()["detail"]
+    assert detail["message"] == "AI agent draft validation failed."
+    assert "Freshdesk payload is missing Search a requester." in detail["blocking"]
+
+
+def test_agent_contact_email_maps_to_email(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    services.schema_cache.put(
+        "ticket_fields",
+        [
+            {"name": "requester", "label": "Contact", "type": "default_requester", "required_for_agents": True},
+            {"name": "cf_form2", "label": "Form", "choices": ["Change Request"]},
+            {"name": "cf_ticket_type", "label": "Ticket Type", "choices": ["Change"]},
+        ],
+    )
+    sent: list[dict[str, object]] = []
+    services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 1234}
+    client = TestClient(app)
+    created = client.post("/api/v1/drafts", json=agent_payload()).json()
+    contact = next(field for field in created["envelope"]["ticket_fields"] if field["key"] == "contact")
+    contact.update({"display_value": "Ada Lovelace <ada@example.com>", "value": "Ada Lovelace <ada@example.com>", "resolved_id": None})
+    patched = client.patch(f"/api/v1/drafts/{created['draft_id']}", json={"edited_by": "kb", "ticket_fields": [contact]}).json()
+
+    response = client.post(f"/api/v1/drafts/{patched['draft_id']}/approve-and-submit", json={"confirmation": "CREATE"})
+
+    assert response.status_code == 200
+    assert sent[0]["email"] == "ada@example.com"
+    assert "contact" not in sent[0]
+    assert "requester_id" not in sent[0]
+
+
+def test_agent_contact_resolved_id_maps_to_requester_id(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    services.schema_cache.put(
+        "ticket_fields",
+        [
+            {"name": "requester", "label": "Contact", "type": "default_requester", "required_for_agents": True},
+            {"name": "cf_form2", "label": "Form", "choices": ["Change Request"]},
+            {"name": "cf_ticket_type", "label": "Ticket Type", "choices": ["Change"]},
+        ],
+    )
+    sent: list[dict[str, object]] = []
+    services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 1234}
+    client = TestClient(app)
+    created = client.post("/api/v1/drafts", json=agent_payload()).json()
+    contact = next(field for field in created["envelope"]["ticket_fields"] if field["key"] == "contact")
+    contact.update({"display_value": "Ada Lovelace", "value": "Ada Lovelace", "resolved_id": 321})
+    patched = client.patch(f"/api/v1/drafts/{created['draft_id']}", json={"edited_by": "kb", "ticket_fields": [contact]}).json()
+
+    response = client.post(f"/api/v1/drafts/{patched['draft_id']}/approve-and-submit", json={"confirmation": "CREATE"})
+
+    assert response.status_code == 200
+    assert sent[0]["requester_id"] == 321
+    assert "email" not in sent[0]
+    assert "contact" not in sent[0]
+
+
+def test_agent_omits_default_company_for_unverified_non_default_contact(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    services.schema_cache.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
+    services.schema_cache.put(
+        "ticket_fields",
+        [
+            {"name": "requester", "label": "Contact", "type": "default_requester", "required_for_agents": True},
+            {"name": "cf_form2", "label": "Form", "choices": ["Change Request"]},
+            {"name": "cf_ticket_type", "label": "Ticket Type", "choices": ["Change"]},
+        ],
+    )
+    sent: list[dict[str, object]] = []
+    services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 1234}
+    client = TestClient(app)
+    created = client.post("/api/v1/drafts", json=agent_payload()).json()
+    contact = next(field for field in created["envelope"]["ticket_fields"] if field["key"] == "contact")
+    contact.update({"display_value": "Ada Lovelace <ada@other.example>", "value": "Ada Lovelace <ada@other.example>", "resolved_id": None})
+    patched = client.patch(f"/api/v1/drafts/{created['draft_id']}", json={"edited_by": "kb", "ticket_fields": [contact]}).json()
+
+    response = client.post(f"/api/v1/drafts/{patched['draft_id']}/approve-and-submit", json={"confirmation": "CREATE"})
+
+    assert response.status_code == 200
+    assert sent[0]["email"] == "ada@other.example"
+    assert "company_id" not in sent[0]
+    assert patched["payload_preview"]["field_errors"] == {}
+
+
+def test_agent_blocks_required_company_when_contact_company_is_unverified(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    services.schema_cache.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
+    services.schema_cache.put(
+        "ticket_fields",
+        [
+            {"name": "requester", "label": "Contact", "type": "default_requester", "required_for_agents": True},
+            {"name": "company", "label": "Company", "type": "default_company", "required_for_agents": True},
+            {"name": "cf_form2", "label": "Form", "choices": ["Change Request"]},
+            {"name": "cf_ticket_type", "label": "Ticket Type", "choices": ["Change"]},
+        ],
+    )
+    sent: list[dict[str, object]] = []
+    services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 1234}
+    client = TestClient(app)
+    created = client.post("/api/v1/drafts", json=agent_payload()).json()
+    contact = next(field for field in created["envelope"]["ticket_fields"] if field["key"] == "contact")
+    contact.update({"display_value": "Ada Lovelace <ada@other.example>", "value": "Ada Lovelace <ada@other.example>", "resolved_id": None})
+    patched = client.patch(f"/api/v1/drafts/{created['draft_id']}", json={"edited_by": "kb", "ticket_fields": [contact]}).json()
+
+    response = client.post(f"/api/v1/drafts/{patched['draft_id']}/approve-and-submit", json={"confirmation": "CREATE"})
+
+    assert response.status_code == 422
+    assert sent == []
+    detail = response.json()["detail"]
+    assert detail["message"] == "AI agent draft validation failed."
+    assert any("could not verify that the selected Contact belongs" in item for item in detail["blocking"])
 
 
 def test_agent_delete_removes_unsubmitted_draft_from_review_inbox(settings: Settings):
@@ -1015,6 +1844,7 @@ def test_agent_update_mode_updates_existing_ticket(settings: Settings):
     app.state.services.freshdesk.update_ticket = lambda ticket_id, payload: sent.append((str(ticket_id), payload)) or {"id": ticket_id}
     client = TestClient(app)
     payload = {**agent_payload(), "mode": "update", "target_ticket_id": 7654}
+    payload["ticket_fields"] = [field for field in payload["ticket_fields"] if field["key"] != "contact"]
     created = client.post("/api/v1/drafts", json=payload).json()
     response = client.post(
         f"/api/v1/drafts/{created['draft_id']}/approve-and-submit",

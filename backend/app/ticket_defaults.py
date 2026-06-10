@@ -113,12 +113,19 @@ class TicketDefaultsService:
         return {
             "requester_name": settings.my_name,
             "requester_email": settings.my_email,
-            "company_id": company.get("id") if company else None,
+            "company_id": None,
+            "identity_company_id": company.get("id") if company else None,
             "group_id": self._group_id("L3 Engineering") if kind == "change" else None,
             "priority": 1,
             "status": 2,
             "source": 2,
             "custom_fields": custom_fields,
+            "safe_payload_defaults": {
+                "priority": 1,
+                "status": 2,
+                "source": 2,
+                "group_id": self._group_id("L3 Engineering") if kind == "change" else None,
+            },
             "identity": {
                 "name": settings.my_name,
                 "email": settings.my_email,
@@ -144,7 +151,9 @@ class TicketDefaultsService:
         if values.get("requester_name") in (None, ""):
             merged["requester_name"] = defaults.get("requester_name") if use_identity_defaults else ""
         if values.get("company_id") in (None, ""):
-            merged["company_id"] = defaults.get("company_id") if use_identity_defaults else None
+            merged["company_id"] = None
         if values.get("group_id") in (None, ""):
             merged["group_id"] = defaults.get("group_id")
+        merged.pop("identity_company_id", None)
+        merged.pop("safe_payload_defaults", None)
         return merged

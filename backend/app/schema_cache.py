@@ -8,7 +8,7 @@ from .database import Database
 
 
 class SchemaCache:
-    SCHEMA_KEYS = {"ticket_fields", "groups", "agents", "companies", "ticket_forms"}
+    SCHEMA_KEYS = {"ticket_fields", "groups", "agents", "companies", "ticket_forms", "products"}
 
     def __init__(self, db: Database, audit: AuditLog):
         self.db = db

@@ -8,7 +8,6 @@ from .sensitive_data import detect_secrets
 
 
 DEFAULT_FIELD_MAP = {
-    "requester": "email",
     "subject": "subject",
     "description": "description",
     "status": "status",
@@ -17,14 +16,49 @@ DEFAULT_FIELD_MAP = {
     "group": "group_id",
     "company": "company_id",
     "agent": "responder_id",
+    "product": "product_id",
     "type": "type",
     "ticket_type": "type",
+}
+
+REQUESTER_FIELDS = {"email", "requester_id"}
+ALLOWED_TICKET_FIELDS = {
+    "subject",
+    "description",
+    "email",
+    "name",
+    "requester_id",
+    "priority",
+    "status",
+    "source",
+    "group_id",
+    "company_id",
+    "responder_id",
+    "product_id",
+    "type",
+    "custom_fields",
+    "tags",
+    "cc_emails",
+    "email_config_id",
 }
 
 
 class TicketValidator:
     def __init__(self, schema: SchemaCache):
         self.schema = schema
+
+    @staticmethod
+    def _choice_values(choices: Any) -> list[str]:
+        if isinstance(choices, list):
+            return [str(value) for value in choices]
+        if isinstance(choices, dict):
+            values: list[str] = []
+            for key, nested in choices.items():
+                values.append(str(key))
+                if isinstance(nested, (list, dict)):
+                    values.extend(TicketValidator._choice_values(nested))
+            return values
+        return []
 
     @staticmethod
     def _missing(value: Any) -> bool:
@@ -35,13 +69,74 @@ class TicketValidator:
     def validate(self, payload: dict[str, Any], *, require_requester: bool = True) -> dict[str, Any]:
         missing: list[dict[str, Any]] = []
         warnings: list[str] = []
+        invalid_fields = sorted(key for key in payload if key not in ALLOWED_TICKET_FIELDS)
+        invalid_custom_fields: list[str] = []
+        invalid_custom_field_values: list[dict[str, Any]] = []
+        invalid_company_association: list[dict[str, Any]] = []
+        invalid_tags: list[Any] = []
         required_fields = self.schema.required_ticket_fields()
+        fields_by_name = {str(field.get("name")): field for field in self.schema.ticket_fields()}
+
+        if "tags" in payload:
+            tags = payload.get("tags")
+            if not isinstance(tags, list) or any(not isinstance(tag, str) or self._missing(tag.strip()) for tag in tags):
+                invalid_tags = tags if isinstance(tags, list) else [tags]
+
+        company_id = payload.get("company_id")
+        requester_email = str(payload.get("email") or "").strip().lower()
+        if company_id not in (None, "") and payload.get("requester_id") in (None, ""):
+            company = self._company_by_id(company_id)
+            invalid_company_association.append(
+                {
+                    "field": "company_id",
+                    "company_id": company_id,
+                    "company_name": (company or {}).get("name"),
+                    "requester_email": requester_email,
+                    "message": "Company can only be submitted after the requester is resolved to a Freshdesk contact that belongs to that company.",
+                }
+            )
+        elif company_id not in (None, "") and requester_email:
+            company = self._company_by_id(company_id)
+            domain = requester_email.rpartition("@")[2]
+            domains = {str(item).lower() for item in (company or {}).get("domains", [])}
+            if domains and domain not in domains:
+                invalid_company_association.append(
+                    {
+                        "field": "company_id",
+                        "company_id": company_id,
+                        "company_name": (company or {}).get("name"),
+                        "requester_email": requester_email,
+                        "message": "Requester email domain does not belong to the selected Freshdesk company.",
+                    }
+                )
+
+        for key, value in (payload.get("custom_fields") or {}).items():
+            name = str(key)
+            field = fields_by_name.get(name)
+            if not field or not name.startswith("cf_"):
+                invalid_custom_fields.append(name)
+                continue
+            choices = self._choice_values(field.get("choices"))
+            if choices and not self._missing(value) and str(value) not in choices:
+                invalid_custom_field_values.append(
+                    {
+                        "name": name,
+                        "label": field.get("label") or field.get("label_for_customers") or name,
+                        "value": value,
+                        "allowed_values": choices,
+                    }
+                )
+
         for field in required_fields:
             name = field.get("name", "")
             api_name = DEFAULT_FIELD_MAP.get(name, name)
-            if not require_requester and api_name in {"email", "requester_id"}:
+            if name == "requester":
+                if not require_requester:
+                    continue
+                value = next((payload.get(key) for key in REQUESTER_FIELDS if not self._missing(payload.get(key))), None)
+            elif not require_requester and api_name in REQUESTER_FIELDS:
                 continue
-            if name.startswith("cf_"):
+            elif name.startswith("cf_"):
                 value = payload.get("custom_fields", {}).get(name)
             else:
                 value = payload.get(api_name)
@@ -58,21 +153,49 @@ class TicketValidator:
 
         # Freshdesk's ticket create endpoint needs these API-level values even before a schema sync.
         api_required = [("subject", "Subject"), ("description", "Description")]
-        if require_requester:
-            api_required.insert(0, ("email", "Requester email"))
         for key, label in api_required:
             if self._missing(payload.get(key)) and not any(item["name"] == key for item in missing):
                 missing.append(
                     {"name": key, "label": label, "type": "text", "allowed_values": [], "user_input_required": True}
                 )
+        if (
+            require_requester
+            and all(self._missing(payload.get(key)) for key in REQUESTER_FIELDS)
+            and not any(item["name"] == "requester" for item in missing)
+        ):
+            missing.append(
+                {
+                    "name": "requester",
+                    "label": "Requester",
+                    "type": "default_requester",
+                    "allowed_values": [],
+                    "user_input_required": True,
+                }
+            )
 
         findings = detect_secrets(json.dumps(payload, default=str))
         if findings:
             warnings.append("Potential sensitive data detected. Remove or redact it before creation.")
+        if invalid_fields:
+            warnings.append(f"Unsupported Freshdesk ticket field(s): {', '.join(invalid_fields)}.")
+        if invalid_custom_fields:
+            warnings.append(f"Unsupported Freshdesk custom field(s): {', '.join(invalid_custom_fields)}.")
+        if invalid_company_association:
+            warnings.append("Requester and company selection do not match Freshdesk company metadata.")
+        if invalid_tags:
+            warnings.append("Freshdesk tags must be an array of non-empty strings.")
 
         return {
-            "valid": not missing and not findings,
+            "valid": not missing and not findings and not invalid_fields and not invalid_custom_fields and not invalid_custom_field_values and not invalid_company_association and not invalid_tags,
             "missing_fields": missing,
+            "invalid_fields": invalid_fields,
+            "invalid_custom_fields": sorted(invalid_custom_fields),
+            "invalid_custom_field_values": invalid_custom_field_values,
+            "invalid_company_association": invalid_company_association,
+            "invalid_tags": invalid_tags,
             "sensitive_data_findings": [finding.to_dict() for finding in findings],
             "warnings": warnings,
         }
+
+    def _company_by_id(self, company_id: Any) -> dict[str, Any] | None:
+        return next((company for company in self.schema.get("companies", []) if str(company.get("id")) == str(company_id)), None)

@@ -188,6 +188,14 @@ th { color: #6d6d72; font-size: 10px; letter-spacing: .08em; text-transform: upp
 .ledger-field-title { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; margin-bottom: 9px; }
 .ledger-field-title strong { font-size: 15px; letter-spacing: -.02em; }
 .ledger-edit input, .ledger-edit select { border-color: #bfc0c5; font-weight: 700; }
+.entity-picker { display: grid; gap: 8px; }
+.entity-context { align-items: center; background: #f7f7f8; color: #55555a; display: flex; gap: 7px; font-size: 11px; line-height: 1.35; padding: 8px; }
+.entity-results { border: 1px solid #d9d9dc; display: grid; max-height: 210px; overflow: auto; }
+.entity-result { background: #ffffff; border: 0; border-bottom: 1px solid #e2e2e4; display: grid; gap: 3px; min-height: 48px; padding: 9px 10px; text-align: left; width: 100%; }
+.entity-result:hover:not(:disabled), .entity-result-selected { background: #f7f7f8; }
+.entity-result strong { font-size: 12px; overflow-wrap: anywhere; }
+.entity-result span, .entity-empty { color: #74747a; font-size: 11px; line-height: 1.35; overflow-wrap: anywhere; }
+.entity-empty { padding: 9px 10px; }
 .ledger-field-main p { color: #5f6066; font-size: 12px; line-height: 1.45; margin-top: 8px; }
 .ledger-meta { border-left: 1px solid #d9d9dc; display: grid; gap: 8px; grid-template-columns: 1fr; margin: 0; padding-left: 16px; }
 .ledger-meta div { min-width: 0; }
@@ -207,6 +215,7 @@ th { color: #6d6d72; font-size: 10px; letter-spacing: .08em; text-transform: upp
 .revision-line span { color: #333337; margin-top: 5px; }
 .revision-line small { color: #74747a; margin-top: 5px; }
 .feedback-json { background: #f7f7f8; border: 1px solid #d9d9dc; color: #111111; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.45; max-height: 360px; overflow: auto; padding: 12px; white-space: pre-wrap; }
+.payload-preview-json { max-height: 520px; }
 .agent-bulk .section-copy { margin-bottom: 18px; }
 .bulk-template-grid { background: #d9d9dc; border: 1px solid #d9d9dc; display: grid; gap: 1px; grid-template-columns: 1fr 1fr; margin-bottom: 18px; }
 .bulk-template-grid article { background: #ffffff; min-height: 130px; padding: 16px; }
