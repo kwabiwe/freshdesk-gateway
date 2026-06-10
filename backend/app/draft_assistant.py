@@ -192,10 +192,6 @@ class DraftAssistantService:
             suggestions["group_id"] = self.defaults.defaults("change").get("group_id")
         elif group_id is not None:
             suggestions["group_id"] = group_id
-        company_id = self._match_named(self.schema.get("companies", []), values.get("company_name"))
-        if company_id is not None:
-            suggestions["company_id"] = company_id
-
         custom_fields = self._custom_fields(values.get("custom_fields"))
         impact_defaulted = self._apply_conservative_impact(kind, notes, custom_fields)
         change_type_defaulted = self._apply_change_type_default(kind, notes, custom_fields)

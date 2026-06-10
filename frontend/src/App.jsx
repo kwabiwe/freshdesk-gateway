@@ -947,6 +947,9 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
                       )}
                     </div>
                     <p>{field.why_this_value || field.missing_reason || "Review this value before approval."}</p>
+                    {Array.isArray(field.field_errors) && field.field_errors.length ? (
+                      <ReviewList items={field.field_errors} empty="" />
+                    ) : null}
                   </div>
                   <dl className="ledger-meta">
                     <div><dt>Original</dt><dd>{original || "Empty"}</dd></div>
@@ -1439,6 +1442,14 @@ function TicketComposer({ kind, schema, refresh, notify, setModal, form, setForm
   };
 
   const validation = draft?.validation_result;
+  const validationMessages = validation ? [
+    ...(validation.invalid_fields || []).map((field) => `Unsupported Freshdesk field: ${field}.`),
+    ...(validation.invalid_custom_fields || []).map((field) => `Unsupported Freshdesk custom field: ${field}.`),
+    ...(validation.invalid_custom_field_values || []).map((field) => `${field.label || field.name} must be one of: ${(field.allowed_values || []).join(", ")}.`),
+    ...(validation.invalid_company_association || []).map((item) => item.message || "Requester and company selection do not match Freshdesk company metadata."),
+    ...(validation.invalid_tags || []).map(() => "Freshdesk tags must be an array of non-empty strings."),
+    ...(validation.warnings || []),
+  ] : [];
   return (
     <div className="composer-layout">
       <section className="section composer-main">
@@ -1561,11 +1572,16 @@ function TicketComposer({ kind, schema, refresh, notify, setModal, form, setForm
               <div><dt>Requester</dt><dd>{draft.payload.email}</dd></div>
               <div><dt>Description</dt><dd className={isChange ? "rich-description" : "preserve"}>{isChange ? <span dangerouslySetInnerHTML={{ __html: draft.payload.description }} /> : draft.payload.description}</dd></div>
             </dl>
+            <div className="validation-box">
+              <strong>Outgoing Freshdesk payload</strong>
+              <pre className="feedback-json payload-preview-json">{JSON.stringify(draft.payload || {}, null, 2)}</pre>
+            </div>
             {!validation.valid && (
               <div className="validation-box">
                 <strong>Cannot create ticket yet</strong>
                 {validation.missing_fields.map((field) => <span key={field.name}>{field.label} <small>{field.type}</small></span>)}
                 {validation.sensitive_data_findings.map((finding) => <span key={finding.kind}>{finding.message}</span>)}
+                <ReviewList items={validationMessages} empty="" />
               </div>
             )}
             <Button

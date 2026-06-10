@@ -182,17 +182,12 @@ class FreshdeskFieldMapper:
             value = proposed_payload.get(key)
             if value not in (None, "") and (key == "type" or isinstance(value, int)):
                 suggestions[key] = value
-        for key, resource in (("group_id", "groups"), ("company_id", "companies")):
+        for key, resource in (("group_id", "groups"),):
             preferred = proposed_payload.get(key) or proposed_payload.get(key.removesuffix("_id") + "_name")
             resolved = self._directory_id(resource, preferred)
             if resolved is not None:
                 suggestions[key] = resolved
                 notes.append(f"Mapped proposed {key} to discovered Freshdesk ID {resolved}.")
-
-        customer_company = self._directory_id("companies", document.customer)
-        if customer_company is not None:
-            suggestions["company_id"] = customer_company
-            notes.append(f"Mapped customer {document.customer} to discovered Freshdesk company ID {customer_company}.")
 
         for name, preferred in (proposed_custom_fields or {}).items():
             field = self.fields_by_name.get(str(name))

@@ -158,7 +158,7 @@ def test_ticket_validator_rejects_malformed_tags(core):
     assert result["invalid_tags"] == ["change,network"]
 
 
-def test_ticket_validator_rejects_requester_company_domain_mismatch(core):
+def test_ticket_validator_rejects_company_without_resolved_requester(core):
     _, _, _, _, schema, _ = core
     schema.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
     result = TicketValidator(schema).validate(
@@ -173,6 +173,7 @@ def test_ticket_validator_rejects_requester_company_domain_mismatch(core):
     assert result["valid"] is False
     assert result["invalid_company_association"][0]["field"] == "company_id"
     assert result["invalid_company_association"][0]["company_name"] == "Example Limited"
+    assert "resolved to a Freshdesk contact" in result["invalid_company_association"][0]["message"]
 
 
 def test_ticket_validator_accepts_requester_id_for_required_requester(core):
@@ -389,6 +390,7 @@ def test_freshdesk_contact_and_company_search_use_autocomplete_endpoints(core, s
     assert client.search_companies("Acme")[0]["name"] == "Acme"
     assert urls == [
         "https://example.freshdesk.com/api/v2/contacts/autocomplete?term=Ada",
+        "https://example.freshdesk.com/api/v2/contacts/8",
         "https://example.freshdesk.com/api/v2/companies/autocomplete?name=Acme",
     ]
 
@@ -454,7 +456,8 @@ def test_ticket_defaults_use_configured_identity_and_cached_schema(core, setting
     schema.put("groups", [{"id": 9, "name": "L3 Engineering"}])
     defaults = TicketDefaultsService(schema, lambda: settings).defaults("change")
     assert defaults["requester_email"] == "test@example.com"
-    assert defaults["company_id"] == 7
+    assert defaults["company_id"] is None
+    assert defaults["identity_company_id"] == 7
     assert defaults["group_id"] == 9
     assert defaults["identity"]["agent_id"] == 8
     assert defaults["custom_fields"] == {
@@ -488,7 +491,7 @@ def test_draft_assistant_accepts_only_cached_schema_values(core, settings: Setti
     defaults = TicketDefaultsService(schema, lambda: settings)
     result = DraftAssistantService(StubLocalLLM(), schema, defaults).suggest("generic", "Notes")
     assert result["suggestions"]["group_id"] == 5
-    assert result["suggestions"]["company_id"] == 7
+    assert "company_id" not in result["suggestions"]
     assert result["suggestions"]["custom_fields"] == {"cf_business_impact": "Minor"}
     assert result["assumptions"] == ["Business impact is minor."]
 
@@ -957,6 +960,36 @@ def test_change_draft_from_structured_notes_uses_valid_freshdesk_payload(setting
     assert draft["validation_result"]["invalid_custom_field_values"] == []
 
 
+def test_change_draft_blocks_company_without_resolved_requester(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    change_schema(services.schema_cache)
+    services.schema_cache.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
+    sent: list[dict[str, object]] = []
+    services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 99}
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/tickets/draft-change",
+        json={
+            "requester_email": "requester@example.com",
+            "company_id": 7,
+            "change_document": wise_change_document(),
+        },
+    )
+
+    assert response.status_code == 200
+    draft = response.json()
+    assert draft["validation_status"] == "invalid"
+    assert draft["payload"]["company_id"] == 7
+    assert "resolved to a Freshdesk contact" in draft["validation_result"]["invalid_company_association"][0]["message"]
+
+    approval = client.post(f"/api/tickets/drafts/{draft['draft_id']}/approve-create", json={"confirmation": "CREATE"})
+
+    assert approval.status_code == 422
+    assert sent == []
+
+
 def test_change_draft_approval_blocks_invalid_custom_field_override(settings: Settings):
     app = create_app(settings)
     services = app.state.services
@@ -1027,8 +1060,7 @@ def agent_payload() -> dict[str, object]:
         "status": "ready_for_review",
         "ticket_fields": [
             {"key": "subject", "kind": "short_text", "display_value": "Mailbox routing change", "required": True, "status": "confirmed", "confidence": 0.9},
-            {"key": "group", "kind": "entity_ref", "display_value": "L3 Engineer", "resolved_id": 999, "required": True, "status": "inferred", "confidence": 0.8},
-            {"key": "agent", "kind": "entity_ref", "display_value": "Kwabiwe Sibanda", "required": True, "status": "confirmed"},
+            {"key": "contact", "kind": "entity_ref", "display_value": "Test User <test@example.com>", "required": True, "status": "confirmed", "confidence": 0.9},
             {"key": "form", "kind": "enum", "display_value": "Change Request", "required": True, "status": "inferred"},
             {"key": "ticket_type", "kind": "enum", "display_value": "Change", "required": True, "status": "inferred"},
             {"key": "status", "kind": "enum", "display_value": "Open", "required": True, "status": "confirmed"},
@@ -1137,7 +1169,7 @@ def test_agent_change_request_ledger_matches_freshdesk_form_order(settings: Sett
     assert "Description" not in [field["label"] for field in fields]
     payload_paths = {field["key"]: field["payload_path"] for field in fields}
     assert payload_paths["product"] == "product_id"
-    assert payload_paths["contact"] == "requester_id or email/name"
+    assert payload_paths["contact"] == "email/name"
     assert payload_paths["change_category"] == "custom_fields.cf_change_catergory"
     assert payload_paths["ticket_type"] == "custom_fields.cf_type"
     assert payload_paths["business_impact"] == "custom_fields.cf_business_impact723800"
@@ -1206,7 +1238,7 @@ def test_agent_patch_tracks_revision_and_feedback_payload(settings: Settings):
     assert submitted["feedback_payload"]["freshdesk_payload"]["subject"] == "Mailbox routing change - reviewed"
 
 
-def test_agent_submit_includes_default_company_when_required(settings: Settings):
+def test_agent_submit_includes_contact_company_when_required(settings: Settings):
     app = create_app(settings)
     services = app.state.services
     services.schema_cache.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
@@ -1222,8 +1254,19 @@ def test_agent_submit_includes_default_company_when_required(settings: Settings)
     services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 1234}
     client = TestClient(app)
     created = client.post("/api/v1/drafts", json=agent_payload()).json()
+    contact = next(field for field in created["envelope"]["ticket_fields"] if field["key"] == "contact")
+    contact.update(
+        {
+            "display_value": "Ada Lovelace",
+            "value": "Ada Lovelace",
+            "resolved_id": 321,
+            "company_id": 7,
+            "record": {"id": 321, "name": "Ada Lovelace", "email": "ada@example.com", "company_id": 7},
+        }
+    )
+    patched = client.patch(f"/api/v1/drafts/{created['draft_id']}", json={"edited_by": "kb", "ticket_fields": [contact]}).json()
 
-    response = client.post(f"/api/v1/drafts/{created['draft_id']}/approve-and-submit", json={"confirmation": "CREATE"})
+    response = client.post(f"/api/v1/drafts/{patched['draft_id']}/approve-and-submit", json={"confirmation": "CREATE"})
 
     assert response.status_code == 200
     assert sent[0]["company_id"] == 7
@@ -1260,6 +1303,17 @@ def test_agent_submit_maps_change_request_fields_to_valid_freshdesk_payload(sett
     services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 1234}
     client = TestClient(app)
     created = client.post("/api/v1/drafts", json=agent_payload()).json()
+    contact = next(field for field in created["envelope"]["ticket_fields"] if field["key"] == "contact")
+    contact.update(
+        {
+            "display_value": "Ada Lovelace",
+            "value": "Ada Lovelace",
+            "resolved_id": 321,
+            "company_id": 7,
+            "record": {"id": 321, "name": "Ada Lovelace", "email": "ada@example.com", "company_id": 7},
+        }
+    )
+    created = client.patch(f"/api/v1/drafts/{created['draft_id']}", json={"edited_by": "kb", "ticket_fields": [contact]}).json()
 
     response = client.post(f"/api/v1/drafts/{created['draft_id']}/approve-and-submit", json={"confirmation": "CREATE"})
 
@@ -1271,7 +1325,8 @@ def test_agent_submit_maps_change_request_fields_to_valid_freshdesk_payload(sett
     assert payload["company_id"] == 7
     assert payload["group_id"] == 9
     assert payload["responder_id"] == 8
-    assert payload["email"] == "test@example.com"
+    assert payload["requester_id"] == 321
+    assert "email" not in payload
     assert payload["priority"] == 1
     assert payload["status"] == 2
     assert "<h2>Scope of the change</h2><p>Update mailbox routing only.</p>" in payload["description"]
@@ -1550,7 +1605,7 @@ def test_agent_omits_default_company_for_unverified_non_default_contact(settings
     assert response.status_code == 200
     assert sent[0]["email"] == "ada@other.example"
     assert "company_id" not in sent[0]
-    assert any("Skipped configured company_id" in item for item in patched["payload_preview"]["mapping_notes"])
+    assert patched["payload_preview"]["field_errors"] == {}
 
 
 def test_agent_blocks_required_company_when_contact_company_is_unverified(settings: Settings):
@@ -1613,6 +1668,7 @@ def test_agent_update_mode_updates_existing_ticket(settings: Settings):
     app.state.services.freshdesk.update_ticket = lambda ticket_id, payload: sent.append((str(ticket_id), payload)) or {"id": ticket_id}
     client = TestClient(app)
     payload = {**agent_payload(), "mode": "update", "target_ticket_id": 7654}
+    payload["ticket_fields"] = [field for field in payload["ticket_fields"] if field["key"] != "contact"]
     created = client.post("/api/v1/drafts", json=payload).json()
     response = client.post(
         f"/api/v1/drafts/{created['draft_id']}/approve-and-submit",

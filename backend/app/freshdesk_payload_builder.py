@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .freshdesk_resolver import FreshdeskResolver, as_int
 from .schema_cache import SchemaCache
 from .ticket_defaults import TicketDefaultsService
 
@@ -59,7 +60,18 @@ def coerce_tags(value: Any) -> list[str]:
 @dataclass
 class PayloadBuildResult:
     payload: dict[str, Any]
+    field_errors: dict[str, list[str]] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
     mapping_notes: list[str] = field(default_factory=list)
+
+    @property
+    def valid(self) -> bool:
+        return not any(self.field_errors.values())
+
+    def add_error(self, key: str, message: str) -> None:
+        errors = self.field_errors.setdefault(key, [])
+        if message not in errors:
+            errors.append(message)
 
 
 class FreshdeskPayloadBuilder:
@@ -68,6 +80,7 @@ class FreshdeskPayloadBuilder:
     def __init__(self, schema: SchemaCache, defaults: TicketDefaultsService):
         self.schema = schema
         self.defaults = defaults
+        self.resolver = FreshdeskResolver(schema)
 
     def build(self, envelope: dict[str, Any], bulk_item: dict[str, Any] | None = None) -> PayloadBuildResult:
         source = bulk_item or envelope
@@ -88,17 +101,19 @@ class FreshdeskPayloadBuilder:
             "source": defaults.get("source", 2),
         }
 
-        self._apply_contact(payload, fields.get("contact", {}), value("contact"), defaults, include_requester=mode != "update")
-        self._apply_company(payload, fields.get("contact", {}), value("contact"), defaults, mode, notes)
-        self._apply_directory_id(payload, "group_id", fields.get("group", {}), "Group", notes)
-        self._apply_directory_id(payload, "responder_id", fields.get("agent", {}), "Agent", notes)
+        result = PayloadBuildResult(payload=payload)
+        self._apply_contact(payload, fields.get("contact", {}), value("contact"), defaults, include_requester=mode != "update", result=result)
+        self._apply_company(payload, fields, defaults, mode, result)
+        self._apply_directory_id(payload, "group_id", fields.get("group", {}), "Group", result)
+        self._apply_directory_id(payload, "responder_id", fields.get("agent", {}), "Agent", result)
 
         custom_fields = dict(defaults.get("custom_fields", {}))
         for key, field_record in fields.items():
-            self._apply_review_field(payload, custom_fields, key, field_record, value(key), notes)
+            self._apply_review_field(payload, custom_fields, key, field_record, value(key), result)
         if custom_fields:
             payload["custom_fields"] = custom_fields
-        return PayloadBuildResult(payload=payload, mapping_notes=list(dict.fromkeys(notes)))
+        self._strip_empty_values(payload)
+        return result
 
     def payload_path(self, key: str, schema_field_name: str = "") -> str:
         if key == "product":
@@ -129,13 +144,9 @@ class FreshdeskPayloadBuilder:
         defaults: dict[str, Any],
         *,
         include_requester: bool,
+        result: PayloadBuildResult,
     ) -> None:
         contact_value = _display(raw_value).strip()
-        default_contact_email = defaults.get("requester_email", "")
-        default_contact_name = defaults.get("requester_name", "")
-        use_default_contact = bool(default_contact_email) and (
-            not contact_value or _loose_match(contact_value, default_contact_name) or _loose_match(contact_value, default_contact_email)
-        )
         explicit_contact = contact.get("source") in {"ai_agent", "user_edit"} or contact.get("resolved_id") not in (None, "")
         if not include_requester and not explicit_contact:
             return
@@ -144,9 +155,6 @@ class FreshdeskPayloadBuilder:
         if contact_email:
             payload["email"] = contact_email
             payload["name"] = contact_value
-        elif use_default_contact:
-            payload["email"] = default_contact_email
-            payload["name"] = contact_value or default_contact_name
         elif contact_value:
             payload["name"] = contact_value
 
@@ -155,69 +163,70 @@ class FreshdeskPayloadBuilder:
             payload.pop("email", None)
             payload.pop("name", None)
             payload["requester_id"] = int(contact_id)
+            result.mapping_notes.append(f"Requester resolved to requester_id {payload['requester_id']}.")
+        elif payload.get("email"):
+            result.mapping_notes.append(f"Requester will be submitted by email {payload['email']}.")
+        elif include_requester:
+            payload.pop("name", None)
+            result.add_error("contact", "Select a Freshdesk contact or enter a valid requester email.")
 
     def _apply_company(
         self,
         payload: dict[str, Any],
-        contact: dict[str, Any],
-        raw_value: Any,
+        fields: dict[str, dict[str, Any]],
         defaults: dict[str, Any],
         mode: str,
-        notes: list[str],
+        result: PayloadBuildResult,
     ) -> None:
         if mode == "update":
             return
-        default_company_id = defaults.get("company_id")
-        if default_company_id in (None, ""):
-            return
+        contact = fields.get("contact", {})
+        company = fields.get("company", {})
+        selected_company_id = as_int(company.get("resolved_id") or company.get("company_id"))
+        contact_record = contact.get("record") if isinstance(contact.get("record"), dict) else {}
+        contact_company_ids = self.resolver.contact_company_ids(contact_record)
+        for item in contact.get("other_company_ids") or []:
+            company_id = as_int(item)
+            if company_id is not None:
+                contact_company_ids.add(company_id)
+        primary_contact_company = as_int(contact.get("company_id") or contact_record.get("company_id"))
+        if primary_contact_company is not None:
+            contact_company_ids.add(primary_contact_company)
 
-        contact_company_id = contact.get("resolved_company_id") or contact.get("company_id")
-        if contact_company_id not in (None, ""):
-            payload["company_id"] = int(contact_company_id)
-            notes.append(f"Mapped Contact's Freshdesk company to company_id {payload['company_id']}.")
-            return
-
-        contact_value = _display(raw_value).strip()
-        contact_email = _email_from(contact_value)
-        if contact_email:
-            company = self._company_for_email(contact_email)
-            if company:
-                payload["company_id"] = int(company["id"])
-                notes.append(f"Mapped Contact email domain to company_id {payload['company_id']}.")
+        if selected_company_id is not None:
+            if contact.get("resolved_id") in (None, ""):
+                result.add_error("company", "Company cannot be submitted until the requester is resolved to a Freshdesk contact.")
                 return
-
-        default_contact_email = defaults.get("requester_email", "")
-        default_contact_name = defaults.get("requester_name", "")
-        using_default_contact = bool(default_contact_email) and (
-            not contact_value or _loose_match(contact_value, default_contact_email) or _loose_match(contact_value, default_contact_name)
-        )
-        if using_default_contact:
-            payload["company_id"] = int(default_company_id)
-            notes.append(f"Mapped configured requester company to company_id {payload['company_id']}.")
+            if selected_company_id not in contact_company_ids:
+                result.add_error("company", "Selected requester does not belong to the selected company.")
+                return
+            payload["company_id"] = selected_company_id
+            result.mapping_notes.append(f"Company resolved to company_id {selected_company_id}.")
             return
 
-        if contact.get("resolved_id") not in (None, "") or contact_value:
-            notes.append(
+        if primary_contact_company is not None:
+            payload["company_id"] = primary_contact_company
+            result.mapping_notes.append(f"Mapped Contact's Freshdesk company to company_id {payload['company_id']}.")
+            return
+
+        if defaults.get("company_id") not in (None, "") and (contact.get("resolved_id") not in (None, "") or payload.get("email")):
+            result.mapping_notes.append(
                 "Skipped configured company_id because the selected Contact is not verified as belonging to that company."
             )
 
-    def _company_for_email(self, email: str) -> dict[str, Any] | None:
-        domain = email.rpartition("@")[2].lower()
-        if not domain:
-            return None
-        for company in self.schema.get("companies", []):
-            domains = {str(item).lower() for item in (company.get("domains") or [])}
-            if domain in domains:
-                return company
-        return None
-
     @staticmethod
-    def _apply_directory_id(payload: dict[str, Any], payload_key: str, field_record: dict[str, Any], label: str, notes: list[str]) -> None:
-        resolved_id = field_record.get("resolved_id")
-        if resolved_id in (None, ""):
+    def _apply_directory_id(payload: dict[str, Any], payload_key: str, field_record: dict[str, Any], label: str, result: PayloadBuildResult) -> None:
+        if field_record.get("status") in {"missing", "needs_human_choice", "conflict"}:
+            if field_record.get("display_value") or field_record.get("value"):
+                result.add_error(field_record.get("key") or label.lower(), f"{label} must be selected from Freshdesk metadata.")
             return
-        payload[payload_key] = int(resolved_id)
-        notes.append(f"Mapped {label} to {payload_key} {payload[payload_key]}.")
+        resolved_id = field_record.get("resolved_id")
+        if resolved_id not in (None, ""):
+            payload[payload_key] = int(resolved_id)
+            result.mapping_notes.append(f"Mapped {label} to {payload_key} {payload[payload_key]}.")
+            return
+        if field_record.get("display_value") or field_record.get("value"):
+            result.add_error(field_record.get("key") or label.lower(), f"{label} must be selected from Freshdesk metadata.")
 
     def _apply_review_field(
         self,
@@ -226,7 +235,7 @@ class FreshdeskPayloadBuilder:
         key: str,
         field_record: dict[str, Any],
         field_value: Any,
-        notes: list[str],
+        result: PayloadBuildResult,
     ) -> None:
         if _missing(field_value):
             return
@@ -234,7 +243,7 @@ class FreshdeskPayloadBuilder:
             tags = coerce_tags(field_value)
             if tags:
                 payload["tags"] = tags
-                notes.append("Converted review Tags into the Freshdesk tags array.")
+                result.mapping_notes.append("Converted review Tags into the Freshdesk tags array.")
             return
 
         field = self._schema_field_for_key(key, str(field_record.get("schema_field_name") or ""))
@@ -243,15 +252,23 @@ class FreshdeskPayloadBuilder:
         name = str(field.get("name") or "")
         if name.startswith("cf_"):
             custom_fields[name] = field_value
-            notes.append(f"Mapped {field_record.get('label') or name} to custom_fields.{name}.")
+            result.mapping_notes.append(f"Mapped {field_record.get('label') or name} to custom_fields.{name}.")
         elif name in {"product", "product_id"}:
             product_id = self._product_id(field, field_record, field_value)
             if product_id is not None:
                 payload["product_id"] = int(product_id)
-                notes.append(f"Mapped Product to product_id {payload['product_id']}.")
+                result.mapping_notes.append(f"Mapped Product to product_id {payload['product_id']}.")
+            elif field_value not in (None, ""):
+                result.add_error("product", "Product must be selected from Freshdesk products so it can be submitted as product_id.")
         elif name in {"type", "ticket_type"}:
             payload["type"] = field_value
-            notes.append("Mapped Ticket Type to top-level type.")
+            result.mapping_notes.append("Mapped Ticket Type to top-level type.")
+
+    @staticmethod
+    def _strip_empty_values(payload: dict[str, Any]) -> None:
+        for key in list(payload):
+            if payload[key] in (None, "", [], {}):
+                payload.pop(key, None)
 
     @staticmethod
     def _product_id(field: dict[str, Any], field_record: dict[str, Any], field_value: Any) -> int | None:

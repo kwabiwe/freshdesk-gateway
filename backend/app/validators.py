@@ -38,6 +38,8 @@ ALLOWED_TICKET_FIELDS = {
     "type",
     "custom_fields",
     "tags",
+    "cc_emails",
+    "email_config_id",
 }
 
 
@@ -82,7 +84,18 @@ class TicketValidator:
 
         company_id = payload.get("company_id")
         requester_email = str(payload.get("email") or "").strip().lower()
-        if company_id not in (None, "") and requester_email:
+        if company_id not in (None, "") and payload.get("requester_id") in (None, ""):
+            company = self._company_by_id(company_id)
+            invalid_company_association.append(
+                {
+                    "field": "company_id",
+                    "company_id": company_id,
+                    "company_name": (company or {}).get("name"),
+                    "requester_email": requester_email,
+                    "message": "Company can only be submitted after the requester is resolved to a Freshdesk contact that belongs to that company.",
+                }
+            )
+        elif company_id not in (None, "") and requester_email:
             company = self._company_by_id(company_id)
             domain = requester_email.rpartition("@")[2]
             domains = {str(item).lower() for item in (company or {}).get("domains", [])}

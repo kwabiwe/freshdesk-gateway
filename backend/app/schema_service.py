@@ -21,6 +21,7 @@ class SchemaService:
             ("groups", self.freshdesk.groups),
             ("agents", self.freshdesk.agents),
             ("companies", self.freshdesk.companies),
+            ("products", getattr(self.freshdesk, "products", lambda: [])),
             ("ticket_forms", self.freshdesk.ticket_forms),
         )
         results: dict[str, Any] = {}
@@ -45,6 +46,8 @@ class SchemaService:
             return "Your Freshdesk agent role cannot list this resource. Using values exposed by ticket fields where available."
         if exc.status_code == 403 and key == "ticket_forms":
             return "Your Freshdesk agent role cannot view ticket forms. Ticket-field validation remains available."
+        if exc.status_code == 403 and key == "products":
+            return "Your Freshdesk agent role cannot list products. Product IDs can still be resolved from ticket-field choices when Freshdesk exposes them."
         if exc.status_code == 404 and key == "ticket_forms":
             return "Ticket forms are not exposed for this Freshdesk account. Ticket-field validation remains available."
         return str(exc.detail)

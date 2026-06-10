@@ -12,6 +12,7 @@ from .audit import AuditLog, utc_now
 from .database import Database
 from .freshdesk_client import FreshdeskClient
 from .freshdesk_payload_builder import FreshdeskPayloadBuilder
+from .freshdesk_resolver import FreshdeskResolver, ResolvedEntity
 from .models import AgentDraftEnvelope, AgentDraftPatch, AgentFeedbackRequest
 from .schema_cache import SchemaCache
 from .ticket_defaults import TicketDefaultsService
@@ -20,9 +21,8 @@ from .validators import TicketValidator
 
 DEFAULT_FIELD_VALUES = {
     "product": "A24 Support",
-    "contact": "",
     "agent": "Kwabiwe Sibanda",
-    "group": "L3 Engineer",
+    "group": "L3 Engineering",
     "business_impact": "Minor",
 }
 FIELD_LABELS = {
@@ -230,6 +230,7 @@ class AgentDraftStore:
         self.validator = validator
         self.defaults = defaults
         self.payload_builder = FreshdeskPayloadBuilder(schema, defaults)
+        self.resolver = FreshdeskResolver(schema)
 
     def metadata(self) -> dict[str, Any]:
         overview = self.schema.overview()
@@ -240,6 +241,7 @@ class AgentDraftStore:
             "groups": self.schema.get("groups", []),
             "agents": self.schema.get("agents", []),
             "companies": self.schema.get("companies", []),
+            "products": self.schema.get("products", []),
             "ticket_forms": self.schema.get("ticket_forms", []),
             "freshdesk_form_profiles": self._form_profiles(),
             "last_sync": overview["last_sync"],
@@ -482,6 +484,12 @@ class AgentDraftStore:
 
     def _normalised(self, envelope: AgentDraftEnvelope) -> AgentDraftEnvelope:
         envelope.ticket_fields = self._normalised_fields(envelope.ticket_fields, envelope.ticket_profile)
+        if envelope.mode == "update":
+            for field in envelope.ticket_fields:
+                if field.key == "contact" and _missing(field.display_value or field.value):
+                    field.required = False
+                    field.field_errors = []
+                    field.missing_reason = ""
         envelope.rendered_description = self._render_description(envelope.description_sections)
         if envelope.mode == "bulk_create":
             envelope.bulk_items = self._normalised_bulk_items(envelope)
@@ -664,11 +672,15 @@ class AgentDraftStore:
         schema_name = str((schema_field or {}).get("name") or "")
         default_values = self.defaults.defaults(ticket_profile)
         if key == "contact":
-            requester_email = default_values.get("requester_email") or ""
-            requester_name = default_values.get("requester_name") or ""
-            value = f"{requester_name} <{requester_email}>".strip() if requester_name and requester_email else requester_email or requester_name
+            value = ""
         else:
             value = (default_values.get("custom_fields") or {}).get(schema_name, DEFAULT_FIELD_VALUES.get(key, ""))
+        if value and key == "product" and self.resolver.resolve_product(value).status != "confirmed":
+            value = ""
+        if value and key == "group" and self.resolver.resolve_group(value).status != "confirmed":
+            value = ""
+        if value and key == "agent" and self.resolver.resolve_agent(value).status != "confirmed":
+            value = ""
         required = bool((schema_field or {}).get("required_for_agents")) or key in REVIEW_REQUIRED_KEYS
         return AgentTicketField(
             key=key,
@@ -687,6 +699,8 @@ class AgentDraftStore:
         )
 
     def _resolved_field(self, field):
+        field.field_errors = []
+        field.warnings = []
         schema_field = self._schema_field_for_field(field)
         if schema_field:
             field.schema_field_name = str(schema_field.get("name") or "")
@@ -697,25 +711,39 @@ class AgentDraftStore:
         field.label = field.label or FIELD_LABELS.get(field.key, field.key.replace("_", " ").title())
         field.payload_path = self.payload_builder.payload_path(field.key, field.schema_field_name)
         if field.key in DEFAULT_FIELD_VALUES and field.key != "contact" and _missing(field.value) and _missing(field.display_value):
-            field.value = DEFAULT_FIELD_VALUES[field.key]
-            field.display_value = DEFAULT_FIELD_VALUES[field.key]
-            field.source = "default"
-            field.status = "confirmed"
+            default_value = DEFAULT_FIELD_VALUES[field.key]
+            if field.key == "product" and self.resolver.resolve_product(default_value).status != "confirmed":
+                default_value = ""
+            if field.key == "group" and self.resolver.resolve_group(default_value).status != "confirmed":
+                default_value = ""
+            if field.key == "agent" and self.resolver.resolve_agent(default_value).status != "confirmed":
+                default_value = ""
+            if default_value:
+                field.value = default_value
+                field.display_value = default_value
+                field.source = "default"
+                field.status = "confirmed"
         value = field.display_value or _display(field.value)
 
+        if field.key == "contact":
+            return self._apply_resolved_entity(field, self.resolver.resolve_contact(field.model_dump()))
+        if field.key == "product":
+            return self._apply_resolved_entity(field, self.resolver.resolve_product(value, field.resolved_id))
         if field.key == "group":
-            return self._resolve_entity(field, self.schema.get("groups", []), "Group")
+            return self._apply_resolved_entity(field, self.resolver.resolve_group(value, field.resolved_id))
         if field.key == "agent":
-            return self._resolve_agent(field)
+            return self._apply_resolved_entity(field, self.resolver.resolve_agent(value, field.resolved_id))
         if field.key == "form":
             return self._resolve_schema_choice(field)
         if field.key == "status":
             return self._resolve_fixed_choice(field, STATUS_CHOICES)
         if field.key == "priority":
             return self._resolve_fixed_choice(field, PRIORITY_CHOICES)
+        if field.key == "customer" and schema_field and field.schema_field_name:
+            return self._apply_resolved_entity(field, self.resolver.resolve_customer_choice(field.schema_field_name, value), value_attr=True)
         if schema_field and schema_field.get("choices"):
             return self._resolve_schema_choice(field)
-        if field.key in {"business_impact", "product", "ticket_type", "customer", "change_type", "change_category", "chg_business_impact", "change_state", "approval_state"}:
+        if field.key in {"business_impact", "ticket_type", "change_type", "change_category", "chg_business_impact", "change_state", "approval_state"}:
             return self._resolve_schema_choice(field)
 
         if field.required and _missing(value):
@@ -724,6 +752,35 @@ class AgentDraftStore:
         elif field.status == "missing":
             field.status = "confirmed"
         field.display_value = value
+        return field
+
+    @staticmethod
+    def _apply_resolved_entity(field, resolved: ResolvedEntity, *, value_attr: bool = False):
+        if resolved.display_value:
+            field.display_value = resolved.display_value
+        if value_attr and resolved.value not in (None, ""):
+            field.value = resolved.value
+        if resolved.resolved_id is not None:
+            field.resolved_id = resolved.resolved_id
+        elif field.status not in {"approved", "user_edit"}:
+            field.resolved_id = None
+        if resolved.email:
+            field.email = resolved.email
+        if resolved.company_id is not None:
+            field.company_id = resolved.company_id
+        if resolved.other_company_ids:
+            field.other_company_ids = sorted(resolved.other_company_ids)
+        if resolved.record:
+            field.record = resolved.record
+        field.payload_path = resolved.payload_path or field.payload_path
+        field.status = resolved.status if resolved.status in {"confirmed", "missing", "needs_human_choice"} else field.status
+        if resolved.error:
+            field.field_errors = list(dict.fromkeys([*field.field_errors, resolved.error]))
+            field.missing_reason = field.missing_reason or resolved.error
+        if resolved.warning:
+            field.warnings = list(dict.fromkeys([*field.warnings, resolved.warning]))
+        if resolved.record:
+            field.value = field.value if field.value not in (None, "") else resolved.display_value
         return field
 
     def _resolve_entity(self, field, records: list[dict[str, Any]], label: str, *, name_keys: tuple[str, ...] = ("name",)):
@@ -882,6 +939,8 @@ class AgentDraftStore:
         warnings: list[str] = []
         for field in ticket_fields:
             value = field.display_value or field.value
+            for error in getattr(field, "field_errors", []) or []:
+                blocking.append(error)
             if field.required and _missing(value):
                 blocking.append(f"{field.label} is required.")
             if field.key != "form" and field.required and field.status in {"missing", "conflict", "needs_human_choice"}:
@@ -924,12 +983,14 @@ class AgentDraftStore:
             envelope.missing_information,
             envelope.ticket_profile,
         )
-        payload = self._ticket_payload(envelope.model_dump())
+        build_result = self.payload_builder.build(envelope.model_dump())
+        payload = build_result.payload
         payload_validation = self.validator.validate(
             payload,
             require_requester=envelope.mode != "update",
         )
-        result.blocking = list(dict.fromkeys([*result.blocking, *self._payload_validation_blocking(payload_validation, payload)]))
+        builder_blocking = [message for messages in build_result.field_errors.values() for message in messages]
+        result.blocking = list(dict.fromkeys([*result.blocking, *builder_blocking, *self._payload_validation_blocking(payload_validation, payload)]))
         result.warnings = list(dict.fromkeys([*envelope.validation.warnings, *result.warnings]))
         result.valid = not result.blocking
         return result
@@ -976,9 +1037,14 @@ class AgentDraftStore:
                 "mapping_notes": [],
             }
         built = self.payload_builder.build(envelope)
+        validation = self.validator.validate(built.payload, require_requester=envelope.get("mode") != "update")
+        valid = built.valid and validation.get("valid", False)
         return {
+            "valid": valid,
             "payload": built.payload,
-            "validation": self.validator.validate(built.payload, require_requester=envelope.get("mode") != "update"),
+            "validation": {**validation, "valid": valid},
+            "field_errors": built.field_errors,
+            "warnings": built.warnings,
             "mapping_notes": built.mapping_notes,
         }
 

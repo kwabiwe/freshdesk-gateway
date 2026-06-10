@@ -244,18 +244,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         services.emergency.require_clear()
         return services.schema_cache.get("agents", [])
 
+    @app.get("/api/freshdesk/products")
+    def freshdesk_products():
+        services.emergency.require_clear()
+        cached = services.schema_cache.get("products", [])
+        if cached:
+            return cached
+        return services.freshdesk.products()
+
     @app.get("/api/freshdesk/ticket-fields")
     def freshdesk_ticket_fields():
         services.emergency.require_clear()
         return services.schema_cache.ticket_fields()
 
+    @app.get("/api/freshdesk/contacts/{contact_id}")
+    def freshdesk_contact(contact_id: str):
+        services.emergency.require_clear()
+        return services.freshdesk.view_contact(contact_id)
+
+    @app.get("/api/freshdesk/contacts")
+    def freshdesk_contacts_by_company(company_id: str = Query(..., min_length=1)):
+        services.emergency.require_clear()
+        return services.freshdesk.contacts_by_company(company_id)
+
     @app.post("/api/freshdesk/search-contacts")
     def freshdesk_search_contacts(body: SearchRequest):
+        services.emergency.require_clear()
         return services.freshdesk.search_contacts(body.query)
 
     @app.post("/api/freshdesk/search-companies")
     def freshdesk_search_companies(body: SearchRequest):
+        services.emergency.require_clear()
         return services.freshdesk.search_companies(body.query)
+
+    @app.post("/api/freshdesk/search-agents")
+    def freshdesk_search_agents(body: SearchRequest):
+        services.emergency.require_clear()
+        return services.freshdesk.search_agents(body.query)
 
     @app.post("/api/local-llm/test")
     @app.post("/api/ollama/test", include_in_schema=False)

@@ -137,8 +137,14 @@ class AgentTicketField(BaseModel):
     value: Any = None
     display_value: str = ""
     resolved_id: int | str | None = None
+    email: str = ""
+    company_id: int | str | None = None
+    other_company_ids: list[int | str] = Field(default_factory=list)
+    record: dict[str, Any] = Field(default_factory=dict)
     required: bool = False
     choices: list[Any] = Field(default_factory=list)
+    field_errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
     status: Literal["confirmed", "inferred", "missing", "conflict", "needs_human_choice", "approved"] = "inferred"
     confidence: float | None = Field(default=None, ge=0, le=1)
     why_this_value: str = ""
