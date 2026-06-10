@@ -793,6 +793,9 @@ class AgentDraftStore:
             "status": fields.get("status", {}).get("value") or 2,
             "source": 2,
         }
+        default_company_id = defaults.get("company_id")
+        if mode != "update" and default_company_id not in (None, ""):
+            payload["company_id"] = int(default_company_id)
         include_requester = mode != "update" or contact.get("source") in {"ai_agent", "user_edit"} or contact.get("resolved_id") not in (None, "")
         if include_requester:
             payload["email"] = contact_email
