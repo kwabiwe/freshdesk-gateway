@@ -8,7 +8,6 @@ from .sensitive_data import detect_secrets
 
 
 DEFAULT_FIELD_MAP = {
-    "requester": "email",
     "subject": "subject",
     "description": "description",
     "status": "status",
@@ -17,8 +16,27 @@ DEFAULT_FIELD_MAP = {
     "group": "group_id",
     "company": "company_id",
     "agent": "responder_id",
+    "product": "product_id",
     "type": "type",
     "ticket_type": "type",
+}
+
+REQUESTER_FIELDS = {"email", "requester_id"}
+ALLOWED_TICKET_FIELDS = {
+    "subject",
+    "description",
+    "email",
+    "name",
+    "requester_id",
+    "priority",
+    "status",
+    "source",
+    "group_id",
+    "company_id",
+    "responder_id",
+    "product_id",
+    "type",
+    "custom_fields",
 }
 
 
@@ -35,13 +53,18 @@ class TicketValidator:
     def validate(self, payload: dict[str, Any], *, require_requester: bool = True) -> dict[str, Any]:
         missing: list[dict[str, Any]] = []
         warnings: list[str] = []
+        invalid_fields = sorted(key for key in payload if key not in ALLOWED_TICKET_FIELDS)
         required_fields = self.schema.required_ticket_fields()
         for field in required_fields:
             name = field.get("name", "")
             api_name = DEFAULT_FIELD_MAP.get(name, name)
-            if not require_requester and api_name in {"email", "requester_id"}:
+            if name == "requester":
+                if not require_requester:
+                    continue
+                value = next((payload.get(key) for key in REQUESTER_FIELDS if not self._missing(payload.get(key))), None)
+            elif not require_requester and api_name in REQUESTER_FIELDS:
                 continue
-            if name.startswith("cf_"):
+            elif name.startswith("cf_"):
                 value = payload.get("custom_fields", {}).get(name)
             else:
                 value = payload.get(api_name)
@@ -58,21 +81,36 @@ class TicketValidator:
 
         # Freshdesk's ticket create endpoint needs these API-level values even before a schema sync.
         api_required = [("subject", "Subject"), ("description", "Description")]
-        if require_requester:
-            api_required.insert(0, ("email", "Requester email"))
         for key, label in api_required:
             if self._missing(payload.get(key)) and not any(item["name"] == key for item in missing):
                 missing.append(
                     {"name": key, "label": label, "type": "text", "allowed_values": [], "user_input_required": True}
                 )
+        if (
+            require_requester
+            and all(self._missing(payload.get(key)) for key in REQUESTER_FIELDS)
+            and not any(item["name"] == "requester" for item in missing)
+        ):
+            missing.append(
+                {
+                    "name": "requester",
+                    "label": "Requester",
+                    "type": "default_requester",
+                    "allowed_values": [],
+                    "user_input_required": True,
+                }
+            )
 
         findings = detect_secrets(json.dumps(payload, default=str))
         if findings:
             warnings.append("Potential sensitive data detected. Remove or redact it before creation.")
+        if invalid_fields:
+            warnings.append(f"Unsupported Freshdesk ticket field(s): {', '.join(invalid_fields)}.")
 
         return {
-            "valid": not missing and not findings,
+            "valid": not missing and not findings and not invalid_fields,
             "missing_fields": missing,
+            "invalid_fields": invalid_fields,
             "sensitive_data_findings": [finding.to_dict() for finding in findings],
             "warnings": warnings,
         }

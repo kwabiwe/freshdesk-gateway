@@ -541,7 +541,10 @@ class AgentDraftStore:
 
         schema_name = str((schema_field or {}).get("name") or "")
         default_values = self.defaults.defaults(ticket_profile)
-        value = (default_values.get("custom_fields") or {}).get(schema_name, DEFAULT_FIELD_VALUES.get(key, ""))
+        if key == "contact":
+            value = default_values.get("requester_name") or DEFAULT_FIELD_VALUES.get(key, "")
+        else:
+            value = (default_values.get("custom_fields") or {}).get(schema_name, DEFAULT_FIELD_VALUES.get(key, ""))
         return AgentTicketField(
             key=key,
             label=(schema_field or {}).get("label") or (schema_field or {}).get("label_for_customers") or FIELD_LABELS.get(key, key.replace("_", " ").title()),
@@ -785,7 +788,12 @@ class AgentDraftStore:
         defaults = self.defaults.defaults(source.get("ticket_profile") or envelope.get("ticket_profile", "change"))
         contact = fields.get("contact", {})
         contact_value = _display(value("contact") or defaults.get("requester_name")).strip()
-        contact_email = self._email_from(contact_value) or defaults.get("requester_email", "")
+        contact_email = self._email_from(contact_value)
+        default_contact_email = defaults.get("requester_email", "")
+        default_contact_name = defaults.get("requester_name", "")
+        use_default_contact = bool(default_contact_email) and (
+            not contact_value or self._loose_match(contact_value, default_contact_name)
+        )
         payload: dict[str, Any] = {
             "subject": _display(value("subject")).strip(),
             "description": source.get("rendered_description", "").strip(),
@@ -798,8 +806,14 @@ class AgentDraftStore:
             payload["company_id"] = int(default_company_id)
         include_requester = mode != "update" or contact.get("source") in {"ai_agent", "user_edit"} or contact.get("resolved_id") not in (None, "")
         if include_requester:
-            payload["email"] = contact_email
-            payload["name"] = contact_value
+            if contact_email:
+                payload["email"] = contact_email
+                payload["name"] = contact_value
+            elif use_default_contact:
+                payload["email"] = default_contact_email
+                payload["name"] = contact_value or default_contact_name
+            elif contact_value:
+                payload["name"] = contact_value
         contact_id = contact.get("resolved_id")
         if contact_id not in (None, ""):
             payload.pop("email", None)
@@ -857,7 +871,9 @@ class AgentDraftStore:
             custom_fields[name] = field_value
         elif name in {"product", "product_id"}:
             resolved = field_value_record.get("resolved_id")
-            payload["product_id" if name == "product_id" else name] = int(resolved) if resolved not in (None, "") else field_value
+            product_id = resolved if resolved not in (None, "") else field_value if isinstance(field_value, int) else None
+            if product_id is not None:
+                payload["product_id"] = int(product_id)
         elif name == "ticket_type":
             payload["type"] = field_value
 
