@@ -170,6 +170,10 @@ class ChangeService:
             "Do not simply copy the full rough notes into multiple fields. Each section must have a distinct purpose: background explains why, "
             "change_description explains what changes, implementation_steps are ordered actions, rollback_branches are reversal or abort paths, "
             "and verification is split into pre-change, in-change and post-change checks. "
+            "Freshdesk-visible fields must read as if written by the change requester or implementation engineer. Never mention source notes, "
+            "rough notes, evidence, source material, prompts, models, AI, automation, the gateway, or the user in title, background, "
+            "change_description, implementation_steps, rollback_branches, verification, risk, impact, communication_plan, expected_outcome "
+            "or success_criteria. Write the operational fact directly instead. "
             "For network and infrastructure changes, infer safe operational steps such as pre-change state capture, access checks, package or "
             "certificate readiness, phased device work, per-device validation, reintroduction and post-change monitoring when supported by the notes. "
             "Use only Freshdesk API field names present in the supplied schema context. Use exact allowed dropdown "
@@ -373,7 +377,7 @@ class ChangeService:
         if _missing_text(document.background) or _same_meaning(document.background, notes):
             document.background = (
                 f"The change is required to {change_summary}. "
-                f"The notes identify a planned maintenance window and target {item_type} devices, so the work should be treated as a controlled, reviewed change."
+                f"The work has a planned maintenance window and target {item_type} devices, so it should be treated as a controlled, reviewed change."
             )
         if _missing_text(document.change_description) or _same_meaning(document.change_description, notes):
             document.change_description = (
@@ -468,7 +472,7 @@ class ChangeService:
             if site:
                 assumptions.append(f"Assumed {item.name} is located in {site} based on the device name.")
         if version:
-            assumptions.append(f"Assumed {version} is the target software version because it is the only version specified in the rough notes.")
+            assumptions.append(f"Assumed {version} is the target software version because no other target version was provided.")
         if has_mtls:
             assumptions.append("Assumed mTLS installation requires certificate/configuration readiness and explicit connectivity validation.")
         assumptions.append("Assumed software rollback or downgrade is only available where supported by the vendor or approved runbook.")
@@ -668,13 +672,13 @@ class ChangeService:
         group_id = suggestions.get("group_id")
         group = next((item for item in self.schema.get("groups", []) if str(item.get("id")) == str(group_id)), None)
         fields = [
-            field("subject", suggestions.get("subject") or document.title, label="Subject", required=True, confidence=0.9, why="Inferred from the rough change notes."),
+            field("subject", suggestions.get("subject") or document.title, label="Subject", required=True, confidence=0.9, why="Inferred from the change request details."),
             field("cf_form2", custom_value("cf_form2") or "Change Request", label="Form", kind="enum", schema_field_name="cf_form2", confidence=1.0, why="Change-style tickets target the Freshdesk Change Request form."),
             field("cf_background_for_the_change", custom_value("cf_background_for_the_change") or document.background, label="Background for the Change", kind="long_text", schema_field_name="cf_background_for_the_change", confidence=0.85, why="Summarises why the change is needed."),
             field("cf_change_type", custom_value("cf_change_type") or document.change_type, label="Change Type", kind="enum", schema_field_name="cf_change_type", confidence=0.75, why="Inferred from explicit change-type language or defaulted conservatively."),
-            field("cf_requested_by", custom_value("cf_requested_by") or identity.get("name") or "", label="Requested By", schema_field_name="cf_requested_by", confidence=0.7, why="Defaulted to the configured gateway requester when the notes do not name a requester."),
+            field("cf_requested_by", custom_value("cf_requested_by") or identity.get("name") or "", label="Requested By", schema_field_name="cf_requested_by", confidence=0.7, why="Defaulted to the configured gateway requester when no requester is named."),
             field("cf_change_owner", custom_value("cf_change_owner") or identity.get("name") or "", label="Change owner", schema_field_name="cf_change_owner", required=True, confidence=0.7, why="Defaulted to the configured gateway owner for review."),
-            field("cf_change_catergory", custom_value("cf_change_catergory", "cf_change_category"), label="Change Category", kind="enum", schema_field_name="cf_change_catergory", confidence=0.55, why="Only filled when the rough notes or model output match a Freshdesk category."),
+            field("cf_change_catergory", custom_value("cf_change_catergory", "cf_change_category"), label="Change Category", kind="enum", schema_field_name="cf_change_catergory", confidence=0.55, why="Only filled when a Freshdesk category can be matched confidently."),
             field("cf_chg_business_impact", custom_value("cf_chg_business_impact") or document.impact, label="CHG Business Impact", kind="enum", schema_field_name="cf_chg_business_impact", confidence=0.7, why="Inferred from the described customer or operational impact."),
             field("cf_change_state", custom_value("cf_change_state") or document.workflow_state, label="Change State", kind="enum", schema_field_name="cf_change_state", required=True, confidence=0.75, why="Inferred from approval/state language or defaulted to pending review."),
             field("cf_approval_state", custom_value("cf_approval_state"), label="Approval State", kind="enum", schema_field_name="cf_approval_state", confidence=0.65, why="Uses Freshdesk default when available."),
@@ -682,8 +686,8 @@ class ChangeService:
             field("status", _display_status(suggestions.get("status") or 2), label="Status", kind="enum", required=True, confidence=1.0, why="Freshdesk create default."),
             field("cf_business_impact723800", custom_value("cf_business_impact723800", "cf_business_impact") or document.impact, label="Business Impact", kind="enum", schema_field_name="cf_business_impact723800", confidence=0.7, why="Inferred from the described business impact."),
             field("group", group.get("name") if group else "", label="Group", kind="entity_ref", confidence=1.0 if group else 0.5, resolved_id=group_id if group else None, why="Resolved from synced Freshdesk group metadata when available."),
-            field("priority", _display_priority(suggestions.get("priority") or 1), label="Priority", kind="enum", required=True, confidence=1.0, why="Freshdesk create default unless rough notes imply otherwise."),
-            field("cf_customer967575", custom_value("cf_customer967575", "cf_customer") or document.customer, label="Customer", kind="enum", schema_field_name="cf_customer967575", required=True, confidence=0.7, why="Inferred from the customer named in the rough notes."),
+            field("priority", _display_priority(suggestions.get("priority") or 1), label="Priority", kind="enum", required=True, confidence=1.0, why="Freshdesk create default unless the change details imply otherwise."),
+            field("cf_customer967575", custom_value("cf_customer967575", "cf_customer") or document.customer, label="Customer", kind="enum", schema_field_name="cf_customer967575", required=True, confidence=0.7, why="Inferred from the customer named in the change request."),
         ]
 
         sections = self._agent_description_sections(document, result)

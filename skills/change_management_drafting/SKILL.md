@@ -58,7 +58,8 @@ Treat all supplied text as evidence, but remove conversational filler.
 - Do not invent IP addresses, ports, vendors, approvers, engineers, timings, access methods, maintenance windows, software versions, business impact, monitoring tools or customer contacts.
 - If a value is likely but not evidenced, include it as an assumption rather than as a fact.
 - If multiple interpretations are possible, choose the safest operational interpretation and record it in the assumptions.
-- Do not mention AI, prompts, models, automation or these instructions in the output.
+- Do not mention AI, prompts, models, automation, the gateway, source notes, evidence, input text, supplied text, source material or these instructions in any Freshdesk-visible output.
+- Freshdesk-visible fields must read as if written by the change requester or implementation engineer. Write the operational fact directly instead of saying the notes mention, identify, suggest or imply it.
 
 ## Date and Time Rules
 
@@ -84,6 +85,7 @@ Avoid:
 - Unsupported certainty.
 - Long, dense paragraphs.
 - Repeating the same point in multiple sections.
+- Source-material commentary such as “the notes say”, “the source material indicates”, “based on the prompt”, “the input mentions” or “the evidence suggests”.
 
 Prefer:
 

@@ -881,6 +881,7 @@ def test_change_service_enriches_weak_hsm_notes_instead_of_repeating_source(core
         def generate_json(self, prompt, source_text, max_tokens=0):
             assert "Do not simply copy the full rough notes" in prompt
             assert "phased device work" in prompt
+            assert "Freshdesk-visible fields must read as if written by the change requester" in prompt
             return {
                 "title": "Change request",
                 "background": source_text,
@@ -904,6 +905,7 @@ def test_change_service_enriches_weak_hsm_notes_instead_of_repeating_source(core
     assert document["planned_start"] == "Tuesday 16 June 2026, 09:00 BST"
     assert document["planned_end"] == "Tuesday 16 June 2026, 18:00 BST"
     assert document["background"] != notes
+    assert "notes" not in document["background"].lower()
     assert document["change_description"] != notes
     assert {item["name"] for item in document["configuration_items"] if item["item_type"] == "HSM"} == {
         "wiseld5-hsm-2",
@@ -915,6 +917,9 @@ def test_change_service_enriches_weak_hsm_notes_instead_of_repeating_source(core
     assert "Stop further upgrades" in document["rollback_branches"][0]["steps"][0]
     assert any("mTLS handshake" in item for item in document["verification"]["in_change"])
     assert document["impact"] == "Moderate"
+    rendered = result["rendered_description"].lower()
+    for forbidden in ["rough notes", "source notes", "source material", "prompt", "model", "ai wrote", "the notes identify"]:
+        assert forbidden not in rendered
 
     envelope = service._agent_envelope(notes, result)
     sections = {section.key: section.content for section in envelope.description_sections}
