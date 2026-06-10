@@ -1176,6 +1176,69 @@ def test_agent_change_request_ledger_matches_freshdesk_form_order(settings: Sett
     assert payload_paths["tags"] == "tags"
 
 
+def test_agent_change_request_adds_required_company_before_contact(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    full_change_request_schema(services.schema_cache)
+    services.schema_cache.put(
+        "ticket_fields",
+        [
+            *services.schema_cache.ticket_fields(),
+            {"name": "company", "label": "Company", "type": "default_company", "required_for_agents": True},
+        ],
+    )
+    services.schema_cache.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
+    services.schema_cache.put("agents", [{"id": 8, "contact": {"name": "Kwabiwe Sibanda"}}])
+    services.schema_cache.put("groups", [{"id": 9, "name": "L3 Engineering"}])
+
+    response = TestClient(app).post("/api/v1/drafts", json=agent_payload())
+
+    assert response.status_code == 200
+    fields = response.json()["envelope"]["ticket_fields"]
+    labels = [field["label"] for field in fields]
+    assert labels.index("Company") < labels.index("Contact")
+    company = next(field for field in fields if field["key"] == "company")
+    assert company["payload_path"] == "company_id"
+    assert company["status"] == "missing"
+
+
+def test_agent_autofills_company_from_selected_contact(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    full_change_request_schema(services.schema_cache)
+    services.schema_cache.put(
+        "ticket_fields",
+        [
+            *services.schema_cache.ticket_fields(),
+            {"name": "company", "label": "Company", "type": "default_company", "required_for_agents": True},
+        ],
+    )
+    services.schema_cache.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
+    services.schema_cache.put("agents", [{"id": 8, "contact": {"name": "Kwabiwe Sibanda"}}])
+    services.schema_cache.put("groups", [{"id": 9, "name": "L3 Engineering"}])
+    client = TestClient(app)
+    created = client.post("/api/v1/drafts", json=agent_payload()).json()
+    contact = next(field for field in created["envelope"]["ticket_fields"] if field["key"] == "contact")
+    contact.update(
+        {
+            "display_value": "Ada Lovelace",
+            "value": "Ada Lovelace",
+            "resolved_id": 321,
+            "email": "ada@example.com",
+            "company_id": 7,
+            "record": {"id": 321, "name": "Ada Lovelace", "email": "ada@example.com", "company_id": 7},
+        }
+    )
+
+    patched = client.patch(f"/api/v1/drafts/{created['draft_id']}", json={"edited_by": "kb", "ticket_fields": [contact]}).json()
+
+    fields = {field["key"]: field for field in patched["envelope"]["ticket_fields"]}
+    assert fields["company"]["display_value"] == "Example Limited"
+    assert fields["company"]["resolved_id"] == 7
+    assert patched["payload_preview"]["payload"]["company_id"] == 7
+    assert patched["validation_result"]["valid"] is True
+
+
 def test_agent_lists_submitted_drafts_for_review_inbox(settings: Settings):
     client = TestClient(create_app(settings))
     first = client.post("/api/v1/drafts", json={**agent_payload(), "draft_id": "agd_first"}).json()

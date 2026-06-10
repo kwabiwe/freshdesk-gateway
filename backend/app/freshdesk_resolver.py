@@ -142,7 +142,7 @@ class FreshdeskResolver:
             display_value=str(display_value or ""),
             payload_path="requester_id or email/name",
             status="needs_human_choice" if display_value else "missing",
-            error="Select a Freshdesk contact or enter a valid requester email." if display_value else "Contact is required.",
+            error="Search and select an existing Freshdesk contact." if display_value else "Search and select a Freshdesk contact.",
             record=record,
         )
 

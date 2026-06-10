@@ -120,6 +120,8 @@ class FreshdeskPayloadBuilder:
             return "product_id"
         if key == "contact":
             return "requester_id or email/name"
+        if key == "company":
+            return "company_id"
         if key == "group":
             return "group_id"
         if key == "agent":
@@ -168,7 +170,7 @@ class FreshdeskPayloadBuilder:
             result.mapping_notes.append(f"Requester will be submitted by email {payload['email']}.")
         elif include_requester:
             payload.pop("name", None)
-            result.add_error("contact", "Select a Freshdesk contact or enter a valid requester email.")
+            result.add_error("contact", "Search and select an existing Freshdesk contact.")
 
     def _apply_company(
         self,

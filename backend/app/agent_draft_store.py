@@ -27,6 +27,7 @@ DEFAULT_FIELD_VALUES = {
 }
 FIELD_LABELS = {
     "product": "Product",
+    "company": "Company",
     "contact": "Contact",
     "subject": "Subject",
     "form": "Form",
@@ -49,11 +50,12 @@ FIELD_LABELS = {
     "tags": "Tags",
 }
 REVIEW_REQUIRED_KEYS = {"contact", "subject", "change_owner", "change_state", "status", "priority", "customer"}
-BUILTIN_REVIEW_KEYS = {"contact", "subject", "status", "group", "agent", "priority", "tags"}
-BASE_FIELD_ORDER = ["contact", "subject", "form"]
+BUILTIN_REVIEW_KEYS = {"contact", "company", "subject", "status", "group", "agent", "priority", "tags"}
+BASE_FIELD_ORDER = ["contact", "company", "subject", "form"]
 COMMON_FIELD_ORDER = ["status", "business_impact", "group", "agent", "priority"]
 SCHEMA_FIELD_KEY_ALIASES = {
     "product": "product",
+    "company": "company",
     "requester": "contact",
     "subject": "subject",
     "cf_form2": "form",
@@ -80,6 +82,7 @@ SCHEMA_FIELD_KEY_ALIASES = {
 }
 FIELD_SCHEMA_PREFERENCES = {
     "product": ("product",),
+    "company": ("company",),
     "contact": ("requester",),
     "subject": ("subject",),
     "form": ("cf_form2",),
@@ -299,11 +302,13 @@ class AgentDraftStore:
         return [self._row_response(row) for row in rows]
 
     def _row_response(self, row) -> dict[str, Any]:
-        envelope = json.loads(row["envelope"])
+        stored_envelope = json.loads(row["envelope"])
+        envelope_model = self._normalised(AgentDraftEnvelope.model_validate(stored_envelope))
+        envelope = envelope_model.model_dump()
         response = {
             "draft_id": row["draft_id"],
             "envelope": envelope,
-            "validation_result": json.loads(row["validation_result"]),
+            "validation_result": envelope_model.validation.model_dump(),
             "revision_events": json.loads(row["revision_events"]),
             "approval_status": row["approval_status"],
             "ticket_id": row["ticket_id"],
@@ -484,6 +489,8 @@ class AgentDraftStore:
 
     def _normalised(self, envelope: AgentDraftEnvelope) -> AgentDraftEnvelope:
         envelope.ticket_fields = self._normalised_fields(envelope.ticket_fields, envelope.ticket_profile)
+        if envelope.mode != "update":
+            envelope.ticket_fields = self._autofill_company_from_contact(envelope.ticket_fields)
         if envelope.mode == "update":
             for field in envelope.ticket_fields:
                 if field.key == "contact" and _missing(field.display_value or field.value):
@@ -496,6 +503,25 @@ class AgentDraftStore:
         envelope.validation = self._validate(envelope)
         envelope.status = "ready_for_review" if envelope.validation.valid else "ready_with_gaps"
         return envelope
+
+    def _autofill_company_from_contact(self, ticket_fields):
+        by_key = {field.key: field for field in ticket_fields}
+        contact = by_key.get("contact")
+        company = by_key.get("company")
+        if not contact or not company:
+            return ticket_fields
+        if company.resolved_id not in (None, "") or not _missing(company.display_value or company.value):
+            return ticket_fields
+        company_id = contact.company_id or (contact.record or {}).get("company_id")
+        if company_id in (None, ""):
+            return ticket_fields
+        resolved = self.resolver.resolve_company(company_id, company_id)
+        if resolved.status != "confirmed":
+            return ticket_fields
+        company.value = resolved.display_value
+        company.source = "freshdesk_metadata"
+        company.why_this_value = "Autofilled from the selected Freshdesk contact's company."
+        return [self._apply_resolved_entity(field, resolved) if field.key == "company" else field for field in ticket_fields]
 
     def _normalised_fields(self, ticket_fields, ticket_profile: str = "change") -> list[Any]:
         existing = {}
@@ -532,8 +558,21 @@ class AgentDraftStore:
         if ticket_form_fields:
             dynamic = [self._review_key_for_schema_name(name) for name in ticket_form_fields]
             preferred = [key for key in CHANGE_REQUEST_REVIEW_ORDER if key in dynamic or self._review_key_available(key)]
-            return list(dict.fromkeys([*preferred, *dynamic]))
-        return [key for key in CHANGE_REQUEST_REVIEW_ORDER if self._review_key_available(key)]
+            return self._with_required_relationship_fields(list(dict.fromkeys([*preferred, *dynamic])))
+        return self._with_required_relationship_fields([key for key in CHANGE_REQUEST_REVIEW_ORDER if self._review_key_available(key)])
+
+    def _with_required_relationship_fields(self, keys: list[str]) -> list[str]:
+        ordered = list(keys)
+        required = {self._review_key_for_schema_name(str(field.get("name"))) for field in self.schema.required_ticket_fields()}
+        for key in ("company",):
+            if key not in required or key in ordered:
+                continue
+            insert_at = ordered.index("contact") if "contact" in ordered else 0
+            ordered.insert(insert_at, key)
+        if "company" in ordered and "contact" in ordered and ordered.index("company") > ordered.index("contact"):
+            ordered.remove("company")
+            ordered.insert(ordered.index("contact"), "company")
+        return ordered
 
     def _review_key_available(self, key: str) -> bool:
         if key in BUILTIN_REVIEW_KEYS:
@@ -636,7 +675,7 @@ class AgentDraftStore:
             "customer",
         }:
             return "enum"
-        if key in {"group", "agent", "contact", "product"}:
+        if key in {"group", "agent", "contact", "product", "company"}:
             return "entity_ref"
         if key in {"background_for_the_change"}:
             return "long_text"
@@ -727,6 +766,8 @@ class AgentDraftStore:
 
         if field.key == "contact":
             return self._apply_resolved_entity(field, self.resolver.resolve_contact(field.model_dump()))
+        if field.key == "company":
+            return self._apply_resolved_entity(field, self.resolver.resolve_company(value, field.resolved_id))
         if field.key == "product":
             return self._apply_resolved_entity(field, self.resolver.resolve_product(value, field.resolved_id))
         if field.key == "group":
@@ -873,6 +914,7 @@ class AgentDraftStore:
             "business_impact": {"business", "impact"},
             "form": {"form"},
             "product": {"product"},
+            "company": {"company"},
             "ticket_type": {"ticket", "type"},
             "customer": {"customer"},
             "background_for_the_change": {"background", "change"},

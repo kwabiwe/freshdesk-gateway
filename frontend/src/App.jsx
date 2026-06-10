@@ -562,6 +562,78 @@ function optionRecords(metadata, field, currentValue) {
   return includeCurrent(choices.length ? [blank, ...choices] : []);
 }
 
+function contactCompanyIds(contact) {
+  const ids = new Set();
+  if (contact?.company_id != null && contact.company_id !== "") ids.add(String(contact.company_id));
+  (contact?.other_companies || []).forEach((item) => {
+    const id = typeof item === "object" ? item.company_id || item.id : item;
+    if (id != null && id !== "") ids.add(String(id));
+  });
+  return ids;
+}
+
+function contactLabel(contact) {
+  const name = contact?.name || "";
+  const email = contact?.email || "";
+  if (name && email) return `${name} <${email}>`;
+  return name || email || String(contact?.id || "");
+}
+
+function contactMatches(contact, query) {
+  const wanted = query.trim().toLowerCase();
+  if (wanted.length < 2) return true;
+  return [contactLabel(contact), contact?.email, contact?.name, contact?.company_name]
+    .filter(Boolean)
+    .some((value) => String(value).toLowerCase().includes(wanted));
+}
+
+function companyLabel(company) {
+  return company?.name || company?.company_name || String(company?.id || "");
+}
+
+function agentLabel(agent) {
+  return agent?.contact?.name || agent?.name || agent?.contact?.email || String(agent?.id || "");
+}
+
+function productRecords(metadata, field) {
+  const products = Array.isArray(metadata?.products) ? metadata.products : [];
+  if (products.length) return products;
+  const schemaField = schemaFieldForReviewField(metadata, field);
+  if (schemaField?.choices && typeof schemaField.choices === "object" && !Array.isArray(schemaField.choices)) {
+    return Object.entries(schemaField.choices)
+      .filter(([, id]) => !Array.isArray(id) && typeof id !== "object")
+      .map(([name, id]) => ({ id, name }));
+  }
+  return [];
+}
+
+function selectableEntityRecords(metadata, field) {
+  if (field.key === "company") return (metadata?.companies || []).map((company) => ({ id: company.id, label: companyLabel(company), record: company }));
+  if (field.key === "product") return productRecords(metadata, field).map((product) => ({ id: product.id, label: product.name || String(product.id), record: product }));
+  if (field.key === "group") return (metadata?.groups || []).map((group) => ({ id: group.id, label: group.name || String(group.id), record: group }));
+  if (field.key === "agent") return (metadata?.agents || []).map((agent) => ({ id: agent.id, label: agentLabel(agent), record: agent }));
+  return [];
+}
+
+function relationshipFieldPatch(field, selected) {
+  return {
+    ...field,
+    value: selected.label,
+    display_value: selected.label,
+    resolved_id: selected.id,
+    record: selected.record || {},
+    source: "user_edit",
+    status: "confirmed",
+    field_errors: [],
+    warnings: [],
+    missing_reason: "",
+  };
+}
+
+function isDirectoryField(field) {
+  return ["company", "product", "group", "agent"].includes(field?.key);
+}
+
 function fieldValue(field) {
   return field?.display_value || field?.value || "";
 }
@@ -580,6 +652,243 @@ function sortAgentDrafts(drafts) {
     if (createdDelta) return createdDelta;
     return Date.parse(b.updated_at || 0) - Date.parse(a.updated_at || 0);
   });
+}
+
+function AgentEntityFieldEditor({ field, ticketFields, metadata, commitFields, notify, disabled }) {
+  const value = fieldValue(field);
+  const companyField = ticketFields.find((item) => item.key === "company");
+  const selectedCompanyId = companyField?.resolved_id ? String(companyField.resolved_id) : "";
+  const selectedCompanyName = companyField?.display_value || companyField?.value || "";
+  const [query, setQuery] = useState(value);
+  const [searchResults, setSearchResults] = useState([]);
+  const [companyContacts, setCompanyContacts] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    setQuery(value);
+  }, [field.key, field.resolved_id, value]);
+
+  useEffect(() => {
+    if (field.key !== "contact" || !selectedCompanyId) {
+      setCompanyContacts([]);
+      return undefined;
+    }
+    let cancelled = false;
+    setLoading(true);
+    request(`/freshdesk/contacts?company_id=${encodeURIComponent(selectedCompanyId)}`)
+      .then((items) => {
+        if (!cancelled) setCompanyContacts(Array.isArray(items) ? items : []);
+      })
+      .catch((error) => {
+        if (!cancelled) notify("error", error.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [field.key, notify, selectedCompanyId]);
+
+  useEffect(() => {
+    if (field.key !== "contact") return undefined;
+    const trimmed = query.trim();
+    if (trimmed.length < 2 || trimmed === value) {
+      setSearchResults([]);
+      return undefined;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      setLoading(true);
+      request("/freshdesk/search-contacts", {
+        method: "POST",
+        body: JSON.stringify({ query: trimmed }),
+      })
+        .then((items) => {
+          if (!cancelled) setSearchResults(Array.isArray(items) ? items : []);
+        })
+        .catch((error) => {
+          if (!cancelled) notify("error", error.message);
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [field.key, notify, query, value]);
+
+  const clearContactPatch = () => ({
+    ...field,
+    value: "",
+    display_value: "",
+    resolved_id: null,
+    email: "",
+    company_id: null,
+    other_company_ids: [],
+    record: {},
+    source: "user_edit",
+    status: field.required ? "missing" : "needs_human_choice",
+    field_errors: [],
+    warnings: [],
+    missing_reason: "",
+  });
+
+  const selectContact = (contact) => {
+    const ids = contactCompanyIds(contact);
+    if (selectedCompanyId && !ids.has(selectedCompanyId)) {
+      notify("error", "That Freshdesk contact is not linked to the selected company.");
+      return;
+    }
+    const companyId = selectedCompanyId || String(contact.company_id || Array.from(ids)[0] || "");
+    const company = (metadata?.companies || []).find((item) => String(item.id) === companyId);
+    const patches = [
+      {
+        ...field,
+        value: contactLabel(contact),
+        display_value: contactLabel(contact),
+        resolved_id: contact.id,
+        email: contact.email || "",
+        company_id: contact.company_id || null,
+        other_company_ids: Array.from(ids),
+        record: contact,
+        source: "user_edit",
+        status: "confirmed",
+        field_errors: [],
+        warnings: [],
+        missing_reason: "",
+      },
+    ];
+    if (companyField && companyId) {
+      patches.push(
+        relationshipFieldPatch(companyField, {
+          id: companyId,
+          label: companyLabel(company || { id: companyId, name: contact.company_name }),
+          record: company || { id: companyId, name: contact.company_name },
+        })
+      );
+    }
+    commitFields(patches);
+  };
+
+  if (field.key === "contact") {
+    const companyPool = companyContacts.filter((contact) => contactMatches(contact, query));
+    const searchPool = selectedCompanyId
+      ? searchResults.filter((contact) => contactCompanyIds(contact).has(selectedCompanyId))
+      : searchResults;
+    const contacts = [...companyPool, ...searchPool].filter(
+      (contact, index, items) => contact?.id && items.findIndex((item) => String(item.id) === String(contact.id)) === index
+    );
+    return (
+      <div className="entity-picker">
+        {selectedCompanyId ? (
+          <div className="entity-context">
+            <Building2 size={14} />
+            <span>Showing contacts linked to {selectedCompanyName || selectedCompanyId}</span>
+          </div>
+        ) : null}
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder={selectedCompanyId ? "Search contacts in selected company" : "Search existing Freshdesk contacts"}
+          aria-label="Search existing Freshdesk contacts"
+          disabled={disabled}
+        />
+        <div className="entity-results">
+          {loading ? <span className="entity-empty">Searching Freshdesk...</span> : null}
+          {contacts.map((contact) => (
+            <button
+              type="button"
+              className={cls("entity-result", String(field.resolved_id || "") === String(contact.id) && "entity-result-selected")}
+              key={contact.id}
+              onClick={() => selectContact(contact)}
+              disabled={disabled}
+            >
+              <strong>{contactLabel(contact)}</strong>
+              <span>{contact.company_name || companyLabel((metadata?.companies || []).find((company) => String(company.id) === String(contact.company_id))) || "No company on contact"}</span>
+            </button>
+          ))}
+          {!loading && query.trim().length >= 2 && !contacts.length ? (
+            <span className="entity-empty">No matching Freshdesk contacts. Choose an existing contact from Freshdesk metadata.</span>
+          ) : null}
+          {!loading && query.trim().length < 2 && !selectedCompanyId ? (
+            <span className="entity-empty">Type at least 2 characters to search Freshdesk contacts.</span>
+          ) : null}
+          {!loading && selectedCompanyId && !contacts.length ? (
+            <span className="entity-empty">No contacts returned for the selected company.</span>
+          ) : null}
+        </div>
+        {field.resolved_id ? (
+          <Button type="button" variant="text" onClick={() => commitFields([clearContactPatch()])} disabled={disabled}>
+            Clear selected contact
+          </Button>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (isDirectoryField(field)) {
+    const records = selectableEntityRecords(metadata, field);
+    return (
+      <div className="entity-picker">
+        <select
+          value={field.resolved_id ? String(field.resolved_id) : ""}
+          onChange={(event) => {
+            const selected = records.find((record) => String(record.id) === event.target.value);
+            if (!selected) {
+              commitFields([
+                {
+                  ...field,
+                  value: "",
+                  display_value: "",
+                  resolved_id: null,
+                  record: {},
+                  source: "user_edit",
+                  status: field.required ? "missing" : "needs_human_choice",
+                  field_errors: [],
+                  warnings: [],
+                  missing_reason: "",
+                },
+              ]);
+              return;
+            }
+            const patches = [relationshipFieldPatch(field, selected)];
+            if (field.key === "company") {
+              const contactField = ticketFields.find((item) => item.key === "contact");
+              if (contactField?.resolved_id) {
+                const contactIds = contactCompanyIds({ company_id: contactField.company_id, other_companies: contactField.record?.other_companies || contactField.other_company_ids || [] });
+                if (!contactIds.has(String(selected.id))) patches.push({
+                  ...contactField,
+                  value: "",
+                  display_value: "",
+                  resolved_id: null,
+                  email: "",
+                  company_id: null,
+                  other_company_ids: [],
+                  record: {},
+                  source: "user_edit",
+                  status: contactField.required ? "missing" : "needs_human_choice",
+                  field_errors: [],
+                  warnings: [],
+                  missing_reason: "Select a contact linked to the selected company.",
+                });
+              }
+            }
+            commitFields(patches);
+          }}
+          disabled={disabled}
+        >
+          <option value="">Select {field.label || field.key}</option>
+          {records.map((record) => <option key={`${field.key}-${record.id}`} value={record.id}>{record.label}</option>)}
+        </select>
+        {!records.length ? <span className="entity-empty">No synced Freshdesk records available for this field.</span> : null}
+      </div>
+    );
+  }
+
+  return null;
 }
 
 function guidanceForSection(key) {
@@ -712,6 +1021,18 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
       const result = await request(`/v1/drafts/${draft.draft_id}`, {
         method: "PATCH",
         body: JSON.stringify({ edited_by: "kb", ticket_fields: [field] }),
+      });
+      setDraft(result);
+    } catch (error) {
+      notify("error", error.message);
+    }
+  };
+
+  const commitFields = async (fields) => {
+    try {
+      const result = await request(`/v1/drafts/${draft.draft_id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ edited_by: "kb", ticket_fields: fields }),
       });
       setDraft(result);
     } catch (error) {
@@ -927,7 +1248,16 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
                       <Badge tone={["missing", "needs_human_choice", "conflict"].includes(field.status) ? "alert" : "neutral"}>{displayToken(field.status, "unknown")}</Badge>
                     </div>
                     <div className="ledger-edit">
-                      {options.length > 1 ? (
+                      {field.kind === "entity_ref" || isDirectoryField(field) || field.key === "contact" ? (
+                        <AgentEntityFieldEditor
+                          field={field}
+                          ticketFields={ticketFields}
+                          metadata={metadata}
+                          commitFields={commitFields}
+                          notify={notify}
+                          disabled={working}
+                        />
+                      ) : options.length > 1 ? (
                         <select
                           value={value}
                           onChange={(event) => {
