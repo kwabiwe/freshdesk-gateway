@@ -317,6 +317,9 @@ function App() {
               refresh={refresh}
               notify={notify}
               setModal={setModal}
+              setPage={setPage}
+              setAgentDraft={setAgentDraft}
+              setAgentMetadata={setAgentMetadata}
               form={composerForms.change}
               draft={composerDrafts.change}
               assumptions={composerAssumptions.change}
@@ -914,6 +917,8 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
   const ticketFields = Array.isArray(envelope?.ticket_fields) ? envelope.ticket_fields : [];
   const descriptionSections = Array.isArray(envelope?.description_sections) ? envelope.description_sections : [];
   const sources = Array.isArray(envelope?.sources) ? envelope.sources : [];
+  const inferredItems = Array.isArray(envelope?.assumptions) ? envelope.assumptions : [];
+  const missingItems = Array.isArray(envelope?.missing_information) ? envelope.missing_information : [];
   const payloadPreview = draft?.payload_preview || null;
   const rawEvents = draft?.revision_events || envelope?.revision?.events || [];
   const events = Array.isArray(rawEvents) ? rawEvents : [];
@@ -1341,6 +1346,27 @@ function AgentReview({ draft, setDraft, metadata, setMetadata, setModal, notify 
             <section className="section">
               <div className="section-head">
                 <div>
+                  <span className="eyebrow">Inferred and missing</span>
+                  <h2>What the drafter assumed</h2>
+                </div>
+              </div>
+              <div className="validation-box">
+                <strong>Inferred values</strong>
+                <ReviewList items={inferredItems.map((item) => item.text || String(item))} empty="No inferred values recorded." />
+              </div>
+              <div className="validation-box">
+                <strong>Missing information</strong>
+                <ReviewList
+                  items={missingItems}
+                  empty="No missing information recorded."
+                  render={(item) => `${item.field || "Field"}: ${item.reason || item}`}
+                />
+              </div>
+            </section>
+
+            <section className="section">
+              <div className="section-head">
+                <div>
                   <span className="eyebrow">Final Freshdesk payload</span>
                   <h2>Exact payload before approval</h2>
                 </div>
@@ -1686,7 +1712,7 @@ function ChangeGenerationReview({ review, fields }) {
   );
 }
 
-function TicketComposer({ kind, schema, refresh, notify, setModal, form, setForm, draft, setDraft, assumptions, setAssumptions }) {
+function TicketComposer({ kind, schema, refresh, notify, setModal, setPage, setAgentDraft, setAgentMetadata, form, setForm, draft, setDraft, assumptions, setAssumptions }) {
   const [working, setWorking] = useState(false);
   const groups = schema?.resources?.groups?.data || [];
   const companies = schema?.resources?.companies?.data || [];
@@ -1720,6 +1746,19 @@ function TicketComposer({ kind, schema, refresh, notify, setModal, form, setForm
     }
     setWorking(true);
     try {
+      if (isChange) {
+        const result = await request("/tickets/draft-change-review", {
+          method: "POST",
+          body: JSON.stringify({ text: form.rough_notes }),
+        });
+        setAgentDraft?.(result.draft);
+        setAgentMetadata?.(result.metadata);
+        if (result.draft?.draft_id) window.localStorage.setItem("ai_agent_review_draft_id", result.draft.draft_id);
+        setAssumptions(result.draft?.envelope?.assumptions?.map((item) => item.text) || []);
+        setPage?.("agent");
+        notify("success", "Local LLM created a Change Request review draft. Resolve the required Freshdesk fields before approval.");
+        return;
+      }
       const result = await request(isChange ? "/local-llm/suggest-change" : "/local-llm/suggest-ticket", {
         method: "POST",
         body: JSON.stringify(isChange ? { text: form.rough_notes } : { kind, text: form.rough_notes }),

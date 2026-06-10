@@ -960,6 +960,56 @@ def test_change_draft_from_structured_notes_uses_valid_freshdesk_payload(setting
     assert draft["validation_result"]["invalid_custom_field_values"] == []
 
 
+def test_change_style_llm_creates_agent_review_draft(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    full_change_request_schema(services.schema_cache)
+    services.schema_cache.put(
+        "ticket_fields",
+        [
+            *services.schema_cache.ticket_fields(),
+            {"name": "company", "label": "Company", "type": "default_company", "required_for_agents": True},
+        ],
+    )
+    services.schema_cache.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
+    services.schema_cache.put("groups", [{"id": 9, "name": "L3 Engineering"}])
+    services.schema_cache.put("agents", [{"id": 8, "contact": {"name": "Kwabiwe Sibanda"}}])
+
+    class StubLocalLLM:
+        def generate_json(self, prompt, source_text, max_tokens=0):
+            assert "Freshdesk Change Request form" in prompt
+            assert "relationship fields unresolved" in prompt
+            return {
+                "change_document": {**wise_change_document(), "customer": "Example"},
+                "custom_fields": {"cf_customer967575": "Example", "cf_change_type": "Normal"},
+                "assumptions": ["Assumed phased HSM upgrade is a normal change."],
+                "open_questions": ["Confirm exact implementation window."],
+            }
+
+    services.changes.local_llm = StubLocalLLM()
+
+    response = TestClient(app).post("/api/tickets/draft-change-review", json={"text": "Upgrade Wise UK HSMs next Tuesday."})
+
+    assert response.status_code == 200
+    body = response.json()
+    draft = body["draft"]
+    fields = draft["envelope"]["ticket_fields"]
+    labels = [field["label"] for field in fields]
+    assert labels.index("Company") < labels.index("Contact")
+    assert "Description" not in labels
+    field_by_key = {field["key"]: field for field in fields}
+    assert field_by_key["form"]["display_value"] == "Change Request"
+    assert field_by_key["customer"]["display_value"] == "Example"
+    assert field_by_key["company"]["status"] == "missing"
+    assert field_by_key["contact"]["status"] in {"missing", "needs_human_choice"}
+    assert "Search and select" in " ".join(field_by_key["contact"]["field_errors"])
+    assert draft["payload_preview"]["payload"]["description"]
+    assert "company_id" not in draft["payload_preview"]["payload"]
+    assert "requester_id" not in draft["payload_preview"]["payload"]
+    assert any(item["text"] == "Assumed phased HSM upgrade is a normal change." for item in draft["envelope"]["assumptions"])
+    assert any(item["field"] == "Open question" and "implementation window" in item["reason"] for item in draft["envelope"]["missing_information"])
+
+
 def test_change_draft_blocks_company_without_resolved_requester(settings: Settings):
     app = create_app(settings)
     services = app.state.services

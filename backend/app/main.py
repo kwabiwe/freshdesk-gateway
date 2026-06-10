@@ -322,6 +322,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         services.emergency.require_clear()
         return services.changes.suggest(body.text)
 
+    @app.post("/api/tickets/draft-change-review")
+    def ticket_draft_change_review(body: ChangeSuggestionRequest):
+        services.emergency.require_clear()
+        envelope = services.changes.agent_envelope_from_notes(body.text)
+        draft = services.agent.create(envelope)
+        return {"draft": draft, "metadata": services.agent.metadata()}
+
     @app.get("/api/local-llm/change-skill")
     def local_llm_change_skill():
         return services.change_skill.overview()
