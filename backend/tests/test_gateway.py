@@ -962,6 +962,29 @@ def test_agent_patch_tracks_revision_and_feedback_payload(settings: Settings):
     assert submitted["feedback_payload"]["freshdesk_payload"]["subject"] == "Mailbox routing change - reviewed"
 
 
+def test_agent_submit_includes_default_company_when_required(settings: Settings):
+    app = create_app(settings)
+    services = app.state.services
+    services.schema_cache.put("companies", [{"id": 7, "name": "Example Limited", "domains": ["example.com"]}])
+    services.schema_cache.put(
+        "ticket_fields",
+        [
+            {"name": "company", "label": "Company", "type": "default_company", "required_for_agents": True},
+            {"name": "cf_form2", "label": "Form", "choices": ["Change Request"]},
+            {"name": "cf_ticket_type", "label": "Ticket Type", "choices": ["Change"]},
+        ],
+    )
+    sent: list[dict[str, object]] = []
+    services.freshdesk.create_ticket = lambda payload: sent.append(payload) or {"id": 1234}
+    client = TestClient(app)
+    created = client.post("/api/v1/drafts", json=agent_payload()).json()
+
+    response = client.post(f"/api/v1/drafts/{created['draft_id']}/approve-and-submit", json={"confirmation": "CREATE"})
+
+    assert response.status_code == 200
+    assert sent[0]["company_id"] == 7
+
+
 def test_agent_delete_removes_unsubmitted_draft_from_review_inbox(settings: Settings):
     client = TestClient(create_app(settings))
     created = client.post("/api/v1/drafts", json=agent_payload()).json()
